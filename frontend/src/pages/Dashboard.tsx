@@ -1,5 +1,8 @@
-import React, { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
+import { Card, KPICard } from "../components";
+import { useDataStore } from "../store/dataStore";
+import { useUIStore } from "../store/uiStore";
+import { getFYBounds, getFYFromDate } from "../engine/financial";
 import {
   AreaChart,
   Area,
@@ -8,403 +11,367 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  BarChart,
-  Bar,
-  Legend,
 } from "recharts";
 import {
   TrendingUp,
-  TrendingDown,
+  ShoppingCart,
   DollarSign,
-  Receipt,
+  FileText,
   Users,
+  CreditCard,
   AlertCircle,
+  Calendar,
 } from "lucide-react";
-import {
-  fetchKPIs,
-  fetchMonthlyKPIs,
-  fetchTopCustomers,
-  fetchTopItems,
-  fetchAging,
-} from "../api/endpoints";
-import KPICard from "../components/KPICard";
-import { formatCurrency, formatNumber } from "../utils/format";
 
-export default function Dashboard() {
-  const currentYear = new Date().getFullYear();
-  const [year, setYear] = useState(currentYear);
+// Indian number formatting
+function formatINR(n: number): string {
+  const abs = Math.abs(n);
+  const sign = n < 0 ? "-" : "";
 
-  const { data: kpis, isLoading: kpisLoading } = useQuery({
-    queryKey: ["kpis"],
-    queryFn: () => fetchKPIs(),
-  });
+  if (abs >= 1_00_00_000) return `${sign}₹${(abs / 1_00_00_000).toFixed(2)}Cr`;
+  if (abs >= 1_00_000) return `${sign}₹${(abs / 1_00_000).toFixed(2)}L`;
+  if (abs >= 1_000) return `${sign}₹${(abs / 1_000).toFixed(1)}K`;
+  return `${sign}₹${abs.toFixed(0)}`;
+}
 
-  const { data: monthly = [], isLoading: monthlyLoading } = useQuery({
-    queryKey: ["monthly", year],
-    queryFn: () => fetchMonthlyKPIs({ year }),
-  });
+export function Dashboard() {
+  const { data } = useDataStore();
+  const { fyYear, setFyYear } = useUIStore();
 
-  const { data: topCustomers = [] } = useQuery({
-    queryKey: ["top-customers"],
-    queryFn: () => fetchTopCustomers({ n: 8 }),
-  });
+  // Financial Year bounds
+  const fyBounds = useMemo(() => getFYBounds(fyYear), [fyYear]);
 
-  const { data: topItems = [] } = useQuery({
-    queryKey: ["top-items"],
-    queryFn: () => fetchTopItems({ n: 8 }),
-  });
+  // Filter vouchers by FY (not cancelled, not optional)
+  const fyVouchers = useMemo(() => {
+    if (!data) return [];
+    return data.vouchers.filter((v) => {
+      if (v.isCancelled || v.isOptional) return false;
+      return v.date >= fyBounds.start && v.date <= fyBounds.end;
+    });
+  }, [data, fyBounds]);
 
-  const { data: aging, isLoading: agingLoading } = useQuery({
-    queryKey: ["aging"],
-    queryFn: fetchAging,
-  });
+  // 1. Total Sales
+  const totalSales = useMemo(() => {
+    return fyVouchers
+      .filter((v) => v.voucherType === "Sales")
+      .reduce((sum, v) => sum + v.amount, 0);
+  }, [fyVouchers]);
+
+  // 2. Total Purchases
+  const totalPurchases = useMemo(() => {
+    return fyVouchers
+      .filter((v) => v.voucherType === "Purchase")
+      .reduce((sum, v) => sum + v.amount, 0);
+  }, [fyVouchers]);
+
+  // 3. Gross Profit
+  const grossProfit = useMemo(() => {
+    return totalSales - totalPurchases;
+  }, [totalSales, totalPurchases]);
+
+  // 4. GST Payable
+  const gstPayable = useMemo(() => {
+    let salesGST = 0;
+    let purchaseGST = 0;
+
+    fyVouchers.forEach((v) => {
+      v.lines.forEach((line) => {
+        if (line.isTaxLine && (line.taxType === "CGST" || line.taxType === "SGST")) {
+          if (v.voucherType === "Sales") {
+            salesGST += Math.abs(line.amount);
+          } else if (v.voucherType === "Purchase") {
+            purchaseGST += Math.abs(line.amount);
+          }
+        }
+      });
+    });
+
+    return salesGST - purchaseGST;
+  }, [fyVouchers]);
+
+  // 5. Receivables (Sundry Debtors)
+  const receivables = useMemo(() => {
+    if (!data) return 0;
+
+    const debtorLedgers = Array.from(data.ledgers.values()).filter(
+      (l) => l.parent.toUpperCase().includes("SUNDRY DEBTORS")
+    );
+
+    let total = 0;
+    debtorLedgers.forEach((ledger) => {
+      // Start with opening balance (positive = receivable)
+      let outstanding = ledger.openingBalance;
+
+      // Add New Ref amounts, subtract Agst Ref amounts
+      fyVouchers.forEach((v) => {
+        v.lines.forEach((line) => {
+          if (line.ledgerName?.toUpperCase() === ledger.nameNormalized) {
+            line.billAllocations.forEach((alloc) => {
+              if (alloc.billType === "New Ref") {
+                outstanding += alloc.amount;
+              } else if (alloc.billType === "Agst Ref") {
+                outstanding -= alloc.amount;
+              }
+            });
+          }
+        });
+      });
+
+      total += outstanding;
+    });
+
+    return total;
+  }, [data, fyVouchers]);
+
+  // 6. Payables (Sundry Creditors)
+  const payables = useMemo(() => {
+    if (!data) return 0;
+
+    const creditorLedgers = Array.from(data.ledgers.values()).filter(
+      (l) => l.parent.toUpperCase().includes("SUNDRY CREDITORS")
+    );
+
+    let total = 0;
+    creditorLedgers.forEach((ledger) => {
+      // Opening balance negative = payable, so take absolute value
+      let outstanding = Math.abs(Math.min(0, ledger.openingBalance));
+
+      // Add New Ref amounts, subtract Agst Ref amounts
+      fyVouchers.forEach((v) => {
+        v.lines.forEach((line) => {
+          if (line.ledgerName?.toUpperCase() === ledger.nameNormalized) {
+            line.billAllocations.forEach((alloc) => {
+              if (alloc.billType === "New Ref") {
+                outstanding += alloc.amount;
+              } else if (alloc.billType === "Agst Ref") {
+                outstanding -= alloc.amount;
+              }
+            });
+          }
+        });
+      });
+
+      total += outstanding;
+    });
+
+    return total;
+  }, [data, fyVouchers]);
+
+  // 7. Today's Sales
+  const todaysSales = useMemo(() => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    return fyVouchers
+      .filter(
+        (v) =>
+          v.voucherType === "Sales" &&
+          v.date >= today &&
+          v.date < tomorrow
+      )
+      .reduce((sum, v) => sum + v.amount, 0);
+  }, [fyVouchers]);
+
+  // 8. Pending Orders
+  const pendingOrders = useMemo(() => {
+    if (!data) return 0;
+    return data.vouchers.filter((v) => v.isOptional && !v.isCancelled).length;
+  }, [data]);
+
+  // Monthly Revenue Chart Data
+  const monthlyData = useMemo(() => {
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const data: { month: string; sales: number; purchases: number }[] = [];
+
+    // Generate last 12 months from FY start
+    for (let i = 0; i < 12; i++) {
+      const monthDate = new Date(fyBounds.start);
+      monthDate.setMonth(monthDate.getMonth() + i);
+
+      const monthStart = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
+      const monthEnd = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0, 23, 59, 59);
+
+      const monthSales = fyVouchers
+        .filter(
+          (v) =>
+            v.voucherType === "Sales" &&
+            v.date >= monthStart &&
+            v.date <= monthEnd
+        )
+        .reduce((sum, v) => sum + v.amount, 0);
+
+      const monthPurchases = fyVouchers
+        .filter(
+          (v) =>
+            v.voucherType === "Purchase" &&
+            v.date >= monthStart &&
+            v.date <= monthEnd
+        )
+        .reduce((sum, v) => sum + v.amount, 0);
+
+      data.push({
+        month: monthNames[monthDate.getMonth()] ?? "Unknown",
+        sales: Math.round(monthSales),
+        purchases: Math.round(monthPurchases),
+      });
+    }
+
+    return data;
+  }, [fyVouchers, fyBounds]);
+
+  // Detect available FY years from data
+  const availableFYs = useMemo(() => {
+    if (!data) return [fyYear];
+    const fySet = new Set<number>();
+    data.vouchers.forEach((v) => {
+      fySet.add(getFYFromDate(v.date));
+    });
+    const years = Array.from(fySet).sort((a, b) => b - a);
+    return years.length > 0 ? years : [fyYear];
+  }, [data, fyYear]);
 
   return (
-    <div className="p-6 space-y-6">
-      {/* Header */}
+    <div className="space-y-6">
+      {/* Header with FY selector */}
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            Tally data analytics · All figures in INR
-          </p>
-        </div>
-        <select
-          value={year}
-          onChange={(e) => setYear(Number(e.target.value))}
-          className="px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white"
-        >
-          {[currentYear - 1, currentYear, currentYear + 1].map((y) => (
-            <option key={y} value={y}>
-              FY {y}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {/* KPI Cards */}
-      {kpisLoading ? (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          {Array.from({ length: 8 }).map((_, i) => (
-            <div key={i} className="card animate-pulse h-24 bg-gray-100" />
-          ))}
-        </div>
-      ) : kpis ? (
-        <>
-          {/* ── Indian GAAP / GST Act 2017 color logic ─────────────────────────
-               GREEN  = Revenue / Profit  (Sales, Gross Profit when +ve)
-               RED    = Loss              (Gross Profit when -ve)
-               BLUE   = Asset / Inflow   (Receivables, GST ITC claimable)
-               ORANGE = Cost / Liability  (Purchases COGS, Payables — normal trade)
-               PURPLE = Govt pass-through (GST Output Tax — NOT your money)
-               ──────────────────────────────────────────────────────────── */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* Revenue → GREEN */}
-          <KPICard
-            title="Total Sales"
-            value={formatCurrency(kpis.total_sales)}
-            subtitle="Revenue from operations (net of GST)"
-            color="green"
-            icon={<TrendingUp size={20} />}
-          />
-          {/* COGS → ORANGE (cost to track, not inherently bad) */}
-          <KPICard
-            title="Total Purchases"
-            value={formatCurrency(kpis.total_purchases)}
-            subtitle="Cost of goods (net of GST / ITC)"
-            color="orange"
-            icon={<TrendingDown size={20} />}
-          />
-          {/* Gross Profit → GREEN if +ve, RED if -ve */}
-          <KPICard
-            title="Gross Profit"
-            value={formatCurrency(kpis.net_revenue)}
-            subtitle={kpis.net_revenue >= 0 ? "Sales − Purchases" : "Loss — review costs"}
-            color={kpis.net_revenue >= 0 ? "green" : "red"}
-            icon={<DollarSign size={20} />}
-          />
-          <KPICard
-            title="Total Vouchers"
-            value={formatNumber(kpis.total_vouchers)}
-            subtitle="All transaction entries"
-            color="purple"
-            icon={<Receipt size={20} />}
-          />
-          {/* Output GST → PURPLE (Govt liability — pass-through, NOT income) */}
-          <KPICard
-            title="GST Output Tax"
-            value={formatCurrency(kpis.gst_collected)}
-            subtitle="Collected from customers · Payable to Govt"
-            color="purple"
-          />
-          {/* Input GST / ITC → BLUE (asset — you claim this back) */}
-          <KPICard
-            title="GST ITC (Input)"
-            value={formatCurrency(kpis.gst_paid)}
-            subtitle="Paid on purchases · Input Tax Credit"
-            color="blue"
-          />
-          {/* Receivables → BLUE (money owed TO you = asset) */}
-          <KPICard
-            title="Receivables"
-            value={formatCurrency(kpis.outstanding_receivables)}
-            subtitle="Sundry Debtors — outstanding from customers"
-            color="blue"
-            icon={<Users size={20} />}
-          />
-          {/* Payables → ORANGE (normal trade liability, not a red-flag) */}
-          <KPICard
-            title="Payables"
-            value={formatCurrency(kpis.outstanding_payables)}
-            subtitle="Sundry Creditors — outstanding to vendors"
-            color="orange"
-            icon={<AlertCircle size={20} />}
-          />
-        </div>
-        </>
-      ) : null}
-
-      {/* Charts Row */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Monthly Revenue Chart */}
-        <div className="card">
-          <h2 className="text-base font-semibold mb-4">
-            Monthly Revenue {year}
-          </h2>
-          {monthlyLoading ? (
-            <div className="h-56 bg-gray-100 animate-pulse rounded-lg" />
-          ) : (
-            <ResponsiveContainer width="100%" height={220}>
-              <AreaChart data={monthly}>
-                <defs>
-                  <linearGradient id="sales-grad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
-                  </linearGradient>
-                  {/* Orange for purchases — cost to monitor, not a "loss" signal */}
-                  <linearGradient id="purchase-grad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#f97316" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="#f97316" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                <XAxis
-                  dataKey="month"
-                  tickFormatter={(v) => v.slice(5)}
-                  tick={{ fontSize: 12 }}
-                />
-                <YAxis
-                  tickFormatter={(v) =>
-                    v >= 100000
-                      ? `${(v / 100000).toFixed(0)}L`
-                      : v >= 1000
-                      ? `${(v / 1000).toFixed(0)}K`
-                      : v
-                  }
-                  tick={{ fontSize: 12 }}
-                />
-                <Tooltip
-                  formatter={(v: number) => formatCurrency(v)}
-                  labelFormatter={(l) => `Month: ${l}`}
-                />
-                <Legend />
-                <Area
-                  type="monotone"
-                  dataKey="sales"
-                  name="Sales"
-                  stroke="#3b82f6"
-                  fill="url(#sales-grad)"
-                  strokeWidth={2}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="purchases"
-                  name="Purchases (COGS)"
-                  stroke="#f97316"
-                  fill="url(#purchase-grad)"
-                  strokeWidth={2}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          )}
-        </div>
-
-        {/* Monthly GST Chart */}
-        <div className="card">
-          <h2 className="text-base font-semibold mb-4">Monthly GST {year}</h2>
-          {monthlyLoading ? (
-            <div className="h-56 bg-gray-100 animate-pulse rounded-lg" />
-          ) : (
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={monthly}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                <XAxis
-                  dataKey="month"
-                  tickFormatter={(v) => v.slice(5)}
-                  tick={{ fontSize: 12 }}
-                />
-                <YAxis
-                  tickFormatter={(v) =>
-                    v >= 1000 ? `${(v / 1000).toFixed(0)}K` : v
-                  }
-                  tick={{ fontSize: 12 }}
-                />
-                <Tooltip formatter={(v: number) => formatCurrency(v)} />
-                <Bar
-                  dataKey="gst_collected"
-                  name="GST Collected"
-                  fill="#f59e0b"
-                  radius={[4, 4, 0, 0]}
-                />
-              </BarChart>
-            </ResponsiveContainer>
-          )}
+        <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
+        <div className="flex items-center gap-2">
+          <Calendar className="w-5 h-5 text-gray-500" />
+          <select
+            value={fyYear}
+            onChange={(e) => setFyYear(Number(e.target.value))}
+            className="px-3 py-2 border border-gray-300 rounded-lg bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            {availableFYs.map((year) => (
+              <option key={year} value={year}>
+                FY {year}-{(year + 1).toString().slice(-2)}
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 
-      {/* AR/AP Aging */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {(["receivables", "payables"] as const).map((kind) => {
-          const buckets = aging?.[kind] ?? [];
-          const total = buckets.reduce((s, b) => s + b.amount, 0);
-          const colors: Record<string, { bar: string; text: string; bg: string }> = {
-            "0-30":  { bar: "bg-green-500",  text: "text-green-700",  bg: "bg-green-50" },
-            "31-60": { bar: "bg-yellow-400", text: "text-yellow-700", bg: "bg-yellow-50" },
-            "61-90": { bar: "bg-orange-500", text: "text-orange-700", bg: "bg-orange-50" },
-            "91+":   { bar: "bg-red-500",    text: "text-red-700",    bg: "bg-red-50" },
-          };
-          return (
-            <div key={kind} className="card">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-base font-semibold">
-                  {kind === "receivables" ? "Receivables Aging" : "Payables Aging"}
-                </h2>
-                {aging && (
-                  <span className="text-xs text-gray-400">As of {aging.as_of}</span>
-                )}
-              </div>
-              {agingLoading ? (
-                <div className="space-y-3">
-                  {[1, 2, 3, 4].map((i) => (
-                    <div key={i} className="h-10 bg-gray-100 animate-pulse rounded-lg" />
-                  ))}
-                </div>
-              ) : buckets.length === 0 ? (
-                <p className="text-sm text-gray-400 py-6 text-center">No data available</p>
-              ) : (
-                <div className="space-y-3">
-                  {buckets.map((b) => {
-                    const pct = total > 0 ? (b.amount / total) * 100 : 0;
-                    const c = colors[b.bucket] ?? { bar: "bg-gray-400", text: "text-gray-700", bg: "bg-gray-50" };
-                    return (
-                      <div key={b.bucket} className={`rounded-lg p-3 ${c.bg}`}>
-                        <div className="flex items-center justify-between mb-1.5">
-                          <span className={`text-xs font-semibold ${c.text}`}>
-                            {b.bucket} days
-                          </span>
-                          <span className={`text-sm font-bold ${c.text}`}>
-                            {formatCurrency(b.amount)}
-                          </span>
-                        </div>
-                        <div className="w-full bg-white/60 rounded-full h-1.5 overflow-hidden">
-                          <div
-                            className={`h-1.5 rounded-full ${c.bar} transition-all duration-500`}
-                            style={{ width: `${pct}%` }}
-                          />
-                        </div>
-                        <div className="text-right mt-0.5">
-                          <span className="text-xs text-gray-400">{pct.toFixed(1)}%</span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                  <div className="border-t border-gray-100 pt-2 flex justify-between text-sm">
-                    <span className="font-medium text-gray-600">Total</span>
-                    <span className="font-bold text-gray-800">{formatCurrency(total)}</span>
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
+      {/* KPI Cards Grid */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+        <KPICard
+          title="Total Sales"
+          value={formatINR(totalSales)}
+          icon={<TrendingUp className="w-6 h-6" />}
+          color="green"
+        />
+        <KPICard
+          title="Total Purchases"
+          value={formatINR(totalPurchases)}
+          icon={<ShoppingCart className="w-6 h-6" />}
+          color="amber"
+        />
+        <KPICard
+          title="Gross Profit"
+          value={formatINR(grossProfit)}
+          icon={<DollarSign className="w-6 h-6" />}
+          color={grossProfit >= 0 ? "green" : "red"}
+        />
+        <KPICard
+          title="GST Payable"
+          value={formatINR(gstPayable)}
+          icon={<FileText className="w-6 h-6" />}
+          color={gstPayable >= 0 ? "blue" : "green"}
+        />
+        <KPICard
+          title="Receivables"
+          value={formatINR(receivables)}
+          icon={<Users className="w-6 h-6" />}
+          color="blue"
+        />
+        <KPICard
+          title="Payables"
+          value={formatINR(payables)}
+          icon={<CreditCard className="w-6 h-6" />}
+          color="red"
+        />
+        <KPICard
+          title="Today's Sales"
+          value={formatINR(todaysSales)}
+          icon={<Calendar className="w-6 h-6" />}
+          color="green"
+        />
+        <KPICard
+          title="Pending Orders"
+          value={pendingOrders.toString()}
+          icon={<AlertCircle className="w-6 h-6" />}
+          color="amber"
+        />
       </div>
 
-      {/* Top tables */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Top customers */}
-        <div className="card">
-          <h2 className="text-base font-semibold mb-4">Top Customers</h2>
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-100">
-                <th className="text-left pb-2 text-gray-500 font-medium">#</th>
-                <th className="text-left pb-2 text-gray-500 font-medium">Customer</th>
-                <th className="text-right pb-2 text-gray-500 font-medium">Revenue</th>
-                <th className="text-right pb-2 text-gray-500 font-medium">Invoices</th>
-              </tr>
-            </thead>
-            <tbody>
-              {topCustomers.length === 0 ? (
-                <tr>
-                  <td colSpan={4} className="py-8 text-center text-gray-400">
-                    No data yet. Import Tally XML files to see customers.
-                  </td>
-                </tr>
-              ) : (
-                topCustomers.map((c, i) => (
-                  <tr key={i} className="border-b border-gray-50">
-                    <td className="py-2 text-gray-400">{i + 1}</td>
-                    <td className="py-2 font-medium">{c.party_name}</td>
-                    <td className="py-2 text-right text-green-700">
-                      {formatCurrency(c.total_amount)}
-                    </td>
-                    <td className="py-2 text-right text-gray-500">
-                      {c.voucher_count}
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+      {/* Monthly Revenue Chart */}
+      <Card title="Monthly Revenue Trend">
+        <div className="h-80">
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart
+              data={monthlyData}
+              margin={{ top: 10, right: 30, left: 0, bottom: 0 }}
+            >
+              <defs>
+                <linearGradient id="colorSales" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
+                  <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                </linearGradient>
+                <linearGradient id="colorPurchases" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#f59e0b" stopOpacity={0.3} />
+                  <stop offset="95%" stopColor="#f59e0b" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+              <XAxis
+                dataKey="month"
+                stroke="#6b7280"
+                fontSize={12}
+                tickLine={false}
+              />
+              <YAxis
+                stroke="#6b7280"
+                fontSize={12}
+                tickLine={false}
+                tickFormatter={(value) => {
+                  if (value >= 1_00_00_000) return `${(value / 1_00_00_000).toFixed(1)}Cr`;
+                  if (value >= 1_00_000) return `${(value / 1_00_000).toFixed(1)}L`;
+                  if (value >= 1_000) return `${(value / 1_000).toFixed(0)}K`;
+                  return value.toString();
+                }}
+              />
+              <Tooltip
+                formatter={(value) => value != null ? formatINR(value as number) : ""}
+                contentStyle={{
+                  backgroundColor: "white",
+                  border: "1px solid #e5e7eb",
+                  borderRadius: "0.5rem",
+                  boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)",
+                }}
+              />
+              <Area
+                type="monotone"
+                dataKey="sales"
+                stroke="#10b981"
+                strokeWidth={2}
+                fillOpacity={1}
+                fill="url(#colorSales)"
+                name="Sales"
+              />
+              <Area
+                type="monotone"
+                dataKey="purchases"
+                stroke="#f59e0b"
+                strokeWidth={2}
+                fillOpacity={1}
+                fill="url(#colorPurchases)"
+                name="Purchases"
+              />
+            </AreaChart>
+          </ResponsiveContainer>
         </div>
-
-        {/* Top items */}
-        <div className="card">
-          <h2 className="text-base font-semibold mb-4">Top Items (Sales)</h2>
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-100">
-                <th className="text-left pb-2 text-gray-500 font-medium">#</th>
-                <th className="text-left pb-2 text-gray-500 font-medium">Item</th>
-                <th className="text-right pb-2 text-gray-500 font-medium">Qty</th>
-                <th className="text-right pb-2 text-gray-500 font-medium">Revenue</th>
-              </tr>
-            </thead>
-            <tbody>
-              {topItems.length === 0 ? (
-                <tr>
-                  <td colSpan={4} className="py-8 text-center text-gray-400">
-                    No items data. Ensure stock items are in your Tally export.
-                  </td>
-                </tr>
-              ) : (
-                topItems.map((item, i) => (
-                  <tr key={i} className="border-b border-gray-50">
-                    <td className="py-2 text-gray-400">{i + 1}</td>
-                    <td className="py-2 font-medium">{item.stock_item_name}</td>
-                    <td className="py-2 text-right text-gray-600">
-                      {formatNumber(item.total_quantity)}
-                    </td>
-                    <td className="py-2 text-right text-green-700">
-                      {formatCurrency(item.total_amount)}
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      </Card>
     </div>
   );
 }

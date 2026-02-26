@@ -1,506 +1,651 @@
-/**
- * Stock Inventory page — with Rate Edit Mode
- *
- * Additions over the base version:
- *  • "Edit Rates" toggle button in the item detail header
- *  • Rate Override card showing current pkg_rate and unit_rate
- *  • Edit mode: both rate fields become editable inputs
- *  • Save → POST /api/rates/{item}   |   Discard → reverts to saved values
- *  • Delete override → DELETE /api/rates/{item}
- *  • Visual highlight on edited (unsaved) fields
- *  • Advisory warnings on large % changes (returned by backend)
- */
-import React, { useEffect, useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import {
-  ChevronLeft,
-  ChevronRight,
-  Package,
-  TrendingUp,
-  TrendingDown,
-  Search,
-  Edit2,
-  X,
-  Save,
-  Trash2,
-  AlertTriangle,
-} from "lucide-react";
-import { fetchItemInventory, fetchItemInventoryDetail } from "../api/endpoints";
-import {
-  fetchRateOverride,
-  saveRateOverride,
-  deleteRateOverride,
-} from "../api/orderEndpoints";
-import { formatNumber } from "../utils/format";
-import type { RateOverride } from "../types/order";
+import { useState, useMemo } from "react";
+import { Edit, Save, X, Trash, ChevronDown, ChevronUp } from "lucide-react";
+import { Card, Toast } from "../components";
+import { useDataStore } from "../store/dataStore";
+import { useUIStore } from "../store/uiStore";
+import { useOverrideStore } from "../store/overrideStore";
+import { computeMonthlyHistory } from "../engine/inventory";
+import { formatQty, type ItemUnitConfig } from "../engine/units";
+import type { CanonicalStockItem } from "../types/canonical";
+import clsx from "clsx";
 
-function MonthLabel({ month }: { month: string }) {
-  const [, m] = month.split("-");
-  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-  return <>{months[parseInt(m, 10) - 1]} {month.slice(2, 4)}</>;
+interface ToastState {
+  show: boolean;
+  message: string;
+  type: "success" | "error";
 }
 
-// ── Rate Edit Card ─────────────────────────────────────────────────────────────
+export function Items() {
+  // Store hooks
+  const { getAllStockItems, getAllVouchers } = useDataStore();
+  const { unitMode, fyYear } = useUIStore();
+  const { getRate, setRate, deleteRate, getUnit, setUnit, deleteUnit } = useOverrideStore();
 
-interface RateCardProps {
-  itemName: string;
-}
+  // Data
+  const items = getAllStockItems();
+  const vouchers = getAllVouchers();
 
-function RateCard({ itemName }: RateCardProps) {
-  const queryClient = useQueryClient();
+  // Get unique groups
+  const groups = useMemo(() => {
+    const groupSet = new Set(items.map((item) => item.group));
+    return Array.from(groupSet).sort();
+  }, [items]);
 
-  // Fetch saved override
-  const { data: saved, isLoading: rateLoading } = useQuery<RateOverride>({
-    queryKey: ["rate-override", itemName],
-    queryFn: () => fetchRateOverride(itemName),
-    enabled: !!itemName,
-  });
+  // State
+  const [selectedItem, setSelectedItem] = useState<CanonicalStockItem | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [groupFilter, setGroupFilter] = useState<string>("");
 
-  // Local edit state
-  const [editMode, setEditMode] = useState(false);
-  const [pkgRate, setPkgRate] = useState<string>("");
-  const [unitRate, setUnitRate] = useState<string>("");
-  const [warnings, setWarnings] = useState<string[]>([]);
+  // Rate edit state
+  const [rateEditMode, setRateEditMode] = useState(false);
+  const [localPkgRate, setLocalPkgRate] = useState<string>("");
+  const [localUnitRate, setLocalUnitRate] = useState<string>("");
 
-  // Sync local state when saved data changes or item changes
-  useEffect(() => {
-    setEditMode(false);
-    setWarnings([]);
-    setPkgRate(saved?.pkg_rate != null ? String(saved.pkg_rate) : "");
-    setUnitRate(saved?.unit_rate != null ? String(saved.unit_rate) : "");
-  }, [saved, itemName]);
+  // Unit config edit state
+  const [unitEditMode, setUnitEditMode] = useState(false);
+  const [localBaseUnit, setLocalBaseUnit] = useState("");
+  const [localPkgUnit, setLocalPkgUnit] = useState("");
+  const [localUnitsPerPkg, setLocalUnitsPerPkg] = useState<string>("");
 
-  const hasUnsavedChanges =
-    editMode &&
-    (pkgRate !== (saved?.pkg_rate != null ? String(saved.pkg_rate) : "") ||
-     unitRate !== (saved?.unit_rate != null ? String(saved.unit_rate) : ""));
+  // UI state
+  const [showChangeLog, setShowChangeLog] = useState(false);
+  const [monthCount, setMonthCount] = useState<8 | 12>(8);
+  const [toast, setToast] = useState<ToastState>({ show: false, message: "", type: "success" });
 
-  // Save mutation
-  const saveMutation = useMutation({
-    mutationFn: () =>
-      saveRateOverride(itemName, {
-        pkg_rate: pkgRate !== "" ? parseFloat(pkgRate) : null,
-        unit_rate: unitRate !== "" ? parseFloat(unitRate) : null,
-      }),
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ["rate-override", itemName] });
-      setWarnings(result.warnings ?? []);
-      setEditMode(false);
-    },
-    onError: (err: Error) => alert(`Save failed: ${err.message}`),
-  });
+  // Filter items
+  const filteredItems = useMemo(() => {
+    return items.filter((item) => {
+      const matchesSearch = item.name.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesGroup = !groupFilter || item.group === groupFilter;
+      return matchesSearch && matchesGroup;
+    });
+  }, [items, searchQuery, groupFilter]);
 
-  // Delete mutation
-  const deleteMutation = useMutation({
-    mutationFn: () => deleteRateOverride(itemName),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["rate-override", itemName] });
-      setWarnings([]);
-      setEditMode(false);
-    },
-    onError: (err: Error) => alert(`Delete failed: ${err.message}`),
-  });
+  // Get unit config for selected item
+  const getItemUnitConfig = (item: CanonicalStockItem | null): ItemUnitConfig | null => {
+    if (!item) return null;
 
-  if (rateLoading) {
-    return (
-      <div className="card animate-pulse h-24" />
-    );
-  }
+    // Check manual override first
+    const override = getUnit(item.name);
+    if (override) {
+      return {
+        itemName: item.name,
+        baseUnit: override.baseUnit,
+        pkgUnit: override.pkgUnit,
+        unitsPerPkg: override.unitsPerPkg,
+        source: "manual",
+      };
+    }
 
-  const hasSavedOverride =
-    saved && (saved.pkg_rate != null || saved.unit_rate != null);
+    // Check Tally native compound unit
+    if (item.alternateUnit && item.alternateConversion && item.alternateConversion > 0) {
+      return {
+        itemName: item.name,
+        baseUnit: item.baseUnit,
+        pkgUnit: item.alternateUnit,
+        unitsPerPkg: item.alternateConversion,
+        source: "tally",
+      };
+    }
+
+    return null;
+  };
+
+  // Handle item selection
+  const handleSelectItem = (item: CanonicalStockItem) => {
+    setSelectedItem(item);
+
+    // Reset edit modes
+    setRateEditMode(false);
+    setUnitEditMode(false);
+
+    // Load saved rates
+    const savedRate = getRate(item.name);
+    setLocalPkgRate(savedRate?.pkgRate?.toString() ?? "");
+    setLocalUnitRate(savedRate?.unitRate?.toString() ?? "");
+
+    // Load unit config
+    const config = getItemUnitConfig(item);
+    if (config) {
+      setLocalBaseUnit(config.baseUnit);
+      setLocalPkgUnit(config.pkgUnit);
+      setLocalUnitsPerPkg(config.unitsPerPkg.toString());
+    } else {
+      setLocalBaseUnit(item.baseUnit);
+      setLocalPkgUnit("PKG");
+      setLocalUnitsPerPkg("");
+    }
+  };
+
+  // Rate edit handlers
+  const handleEditRates = () => {
+    setRateEditMode(true);
+  };
+
+  const handleSaveRates = () => {
+    if (!selectedItem) return;
+
+    const pkgRate = localPkgRate ? parseFloat(localPkgRate) : undefined;
+    const unitRate = localUnitRate ? parseFloat(localUnitRate) : undefined;
+
+    if ((pkgRate !== undefined && isNaN(pkgRate)) || (unitRate !== undefined && isNaN(unitRate))) {
+      setToast({ show: true, message: "Invalid rate value", type: "error" });
+      return;
+    }
+
+    if (pkgRate === undefined && unitRate === undefined) {
+      setToast({ show: true, message: "At least one rate must be set", type: "error" });
+      return;
+    }
+
+    setRate(selectedItem.name, { pkgRate, unitRate });
+    setRateEditMode(false);
+    setToast({ show: true, message: "Rates saved successfully", type: "success" });
+  };
+
+  const handleDiscardRates = () => {
+    if (!selectedItem) return;
+    const savedRate = getRate(selectedItem.name);
+    setLocalPkgRate(savedRate?.pkgRate?.toString() ?? "");
+    setLocalUnitRate(savedRate?.unitRate?.toString() ?? "");
+    setRateEditMode(false);
+  };
+
+  const handleDeleteRates = () => {
+    if (!selectedItem) return;
+    deleteRate(selectedItem.name);
+    setLocalPkgRate("");
+    setLocalUnitRate("");
+    setRateEditMode(false);
+    setToast({ show: true, message: "Rate override deleted", type: "success" });
+  };
+
+  // Unit config handlers
+  const handleEditUnitConfig = () => {
+    setUnitEditMode(true);
+  };
+
+  const handleSaveUnitConfig = () => {
+    if (!selectedItem) return;
+
+    const unitsPerPkg = parseFloat(localUnitsPerPkg);
+
+    if (!localBaseUnit.trim()) {
+      setToast({ show: true, message: "Base unit is required", type: "error" });
+      return;
+    }
+
+    if (!localPkgUnit.trim()) {
+      setToast({ show: true, message: "Package unit is required", type: "error" });
+      return;
+    }
+
+    if (isNaN(unitsPerPkg) || unitsPerPkg <= 0) {
+      setToast({ show: true, message: "Units per package must be a positive number", type: "error" });
+      return;
+    }
+
+    setUnit(selectedItem.name, {
+      baseUnit: localBaseUnit.trim(),
+      pkgUnit: localPkgUnit.trim(),
+      unitsPerPkg,
+    });
+
+    setUnitEditMode(false);
+    setToast({ show: true, message: "Unit configuration saved", type: "success" });
+  };
+
+  const handleDiscardUnitConfig = () => {
+    if (!selectedItem) return;
+    const config = getItemUnitConfig(selectedItem);
+    if (config) {
+      setLocalBaseUnit(config.baseUnit);
+      setLocalPkgUnit(config.pkgUnit);
+      setLocalUnitsPerPkg(config.unitsPerPkg.toString());
+    } else {
+      setLocalBaseUnit(selectedItem.baseUnit);
+      setLocalPkgUnit("PKG");
+      setLocalUnitsPerPkg("");
+    }
+    setUnitEditMode(false);
+  };
+
+  const handleDeleteUnitConfig = () => {
+    if (!selectedItem) return;
+    deleteUnit(selectedItem.name);
+    setLocalBaseUnit(selectedItem.baseUnit);
+    setLocalPkgUnit("PKG");
+    setLocalUnitsPerPkg("");
+    setUnitEditMode(false);
+    setToast({ show: true, message: "Unit configuration deleted", type: "success" });
+  };
+
+  // Get saved rate data
+  const savedRate = selectedItem ? getRate(selectedItem.name) : null;
+  const savedUnitConfig = selectedItem ? getItemUnitConfig(selectedItem) : null;
+
+  // Check if rates have changed
+  const pkgRateChanged = localPkgRate !== (savedRate?.pkgRate?.toString() ?? "");
+  const unitRateChanged = localUnitRate !== (savedRate?.unitRate?.toString() ?? "");
+
+  // Get monthly history
+  const monthlyHistory = selectedItem
+    ? computeMonthlyHistory(selectedItem, vouchers, fyYear, monthCount)
+    : [];
+
+  // Get current closing stock
+  const currentClosing = selectedItem
+    ? formatQty(selectedItem.openingQty, savedUnitConfig, unitMode)
+    : null;
 
   return (
-    <div className={`card border-2 transition-colors ${
-      editMode ? "border-amber-300 bg-amber-50/30" : "border-transparent"
-    }`}>
-      {/* Header row */}
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <h3 className="text-sm font-semibold text-gray-700">Rate Override</h3>
-          {hasSavedOverride && !editMode && (
-            <span className="text-xs px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded-full font-medium">
-              Custom
-            </span>
-          )}
-          {editMode && hasUnsavedChanges && (
-            <span className="text-xs px-1.5 py-0.5 bg-red-100 text-red-600 rounded-full font-medium">
-              Unsaved
-            </span>
-          )}
-        </div>
-
-        <div className="flex items-center gap-1.5">
-          {editMode ? (
-            <>
-              <button
-                onClick={() => {
-                  // Discard — revert to saved
-                  setPkgRate(saved?.pkg_rate != null ? String(saved.pkg_rate) : "");
-                  setUnitRate(saved?.unit_rate != null ? String(saved.unit_rate) : "");
-                  setEditMode(false);
-                  setWarnings([]);
-                }}
-                className="flex items-center gap-1 px-2 py-1 text-xs text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50"
-              >
-                <X size={12} /> Discard
-              </button>
-              <button
-                onClick={() => saveMutation.mutate()}
-                disabled={saveMutation.isPending}
-                className="flex items-center gap-1 px-2 py-1 text-xs bg-amber-500 text-white rounded-lg hover:bg-amber-600 disabled:opacity-50"
-              >
-                <Save size={12} />
-                {saveMutation.isPending ? "Saving…" : "Save"}
-              </button>
-              {hasSavedOverride && (
-                <button
-                  onClick={() => {
-                    if (confirm("Remove rate override and revert to Tally rates?")) {
-                      deleteMutation.mutate();
-                    }
-                  }}
-                  disabled={deleteMutation.isPending}
-                  className="flex items-center gap-1 px-2 py-1 text-xs text-red-600 border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50"
-                  title="Remove override — revert to Tally XML rates"
-                >
-                  <Trash2 size={12} />
-                </button>
-              )}
-            </>
-          ) : (
-            <button
-              onClick={() => setEditMode(true)}
-              className="flex items-center gap-1.5 px-2.5 py-1 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100"
-            >
-              <Edit2 size={12} /> Edit Rates
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Rate fields */}
-      <div className="grid grid-cols-2 gap-3">
-        {/* PKG Rate */}
-        <div>
-          <label className="block text-xs text-gray-500 mb-1">PKG Rate (₹ / package)</label>
-          {editMode ? (
-            <input
-              type="number"
-              min={0}
-              step={0.01}
-              value={pkgRate}
-              placeholder="e.g. 1500.00"
-              onChange={(e) => setPkgRate(e.target.value)}
-              className={`w-full px-2 py-1.5 text-sm border rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-300 ${
-                pkgRate !== (saved?.pkg_rate != null ? String(saved.pkg_rate) : "")
-                  ? "border-amber-400 bg-amber-50"
-                  : "border-gray-200"
-              }`}
-            />
-          ) : (
-            <div className="text-sm font-semibold text-gray-800">
-              {saved?.pkg_rate != null
-                ? `₹ ${saved.pkg_rate.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`
-                : <span className="text-gray-400 font-normal italic">Not set (uses Tally)</span>}
-            </div>
-          )}
-        </div>
-
-        {/* Unit Rate */}
-        <div>
-          <label className="block text-xs text-gray-500 mb-1">Unit Rate (₹ / piece)</label>
-          {editMode ? (
-            <input
-              type="number"
-              min={0}
-              step={0.01}
-              value={unitRate}
-              placeholder="e.g. 5.00"
-              onChange={(e) => setUnitRate(e.target.value)}
-              className={`w-full px-2 py-1.5 text-sm border rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-300 ${
-                unitRate !== (saved?.unit_rate != null ? String(saved.unit_rate) : "")
-                  ? "border-amber-400 bg-amber-50"
-                  : "border-gray-200"
-              }`}
-            />
-          ) : (
-            <div className="text-sm font-semibold text-gray-800">
-              {saved?.unit_rate != null
-                ? `₹ ${saved.unit_rate.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`
-                : <span className="text-gray-400 font-normal italic">Not set (uses Tally)</span>}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Last modified */}
-      {hasSavedOverride && saved?.last_modified && !editMode && (
-        <p className="text-xs text-gray-400 mt-2">
-          Last updated: {new Date(saved.last_modified).toLocaleString("en-IN")}
-        </p>
-      )}
-
-      {/* Advisory warnings from backend */}
-      {warnings.length > 0 && (
-        <div className="mt-2 p-2 rounded-lg bg-yellow-50 border border-yellow-200">
-          {warnings.map((w, i) => (
-            <div key={i} className="flex items-start gap-1.5 text-xs text-yellow-800">
-              <AlertTriangle size={11} className="mt-0.5 shrink-0" />
-              {w}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {editMode && (
-        <p className="text-xs text-gray-400 mt-2">
-          Overrides take precedence over Tally XML rates in all dashboard calculations.
-          Negative rates are not allowed.
-        </p>
-      )}
-    </div>
-  );
-}
-
-// ── Main Items page ───────────────────────────────────────────────────────────
-
-export default function Items() {
-  const [months, setMonths] = useState<8 | 12>(8);
-  const [search, setSearch] = useState("");
-  const [selectedItem, setSelectedItem] = useState<string | null>(null);
-  const [itemIndex, setItemIndex] = useState(0);
-
-  const { data: inventory = [], isLoading } = useQuery({
-    queryKey: ["item-inventory", months],
-    queryFn: () => fetchItemInventory({ months }),
-  });
-
-  const filtered = inventory.filter((i) =>
-    i.stock_item_name.toLowerCase().includes(search.toLowerCase())
-  );
-
-  // When filtered list changes, sync selection
-  useEffect(() => {
-    if (filtered.length === 0) { setSelectedItem(null); setItemIndex(0); return; }
-    const idx = selectedItem ? filtered.findIndex((i) => i.stock_item_name === selectedItem) : -1;
-    if (idx >= 0) { setItemIndex(idx); }
-    else { setItemIndex(0); setSelectedItem(filtered[0].stock_item_name); }
-  }, [filtered.length, search]);
-
-  const { data: detail, isLoading: detailLoading } = useQuery({
-    queryKey: ["item-detail", selectedItem, months],
-    queryFn: () => selectedItem ? fetchItemInventoryDetail(selectedItem, months) : Promise.resolve(null),
-    enabled: !!selectedItem,
-  });
-
-  const currentItem = detail ?? filtered[itemIndex] ?? null;
-  const totalInward = currentItem?.monthly_data.reduce((s, m) => s + m.inward, 0) ?? 0;
-  const totalOutward = currentItem?.monthly_data.reduce((s, m) => s + m.outward, 0) ?? 0;
-
-  function go(dir: 1 | -1) {
-    if (!filtered.length) return;
-    const newIdx = (itemIndex + dir + filtered.length) % filtered.length;
-    setItemIndex(newIdx);
-    setSelectedItem(filtered[newIdx].stock_item_name);
-  }
-
-  return (
-    <div className="p-6 space-y-6">
+    <div className="h-screen flex flex-col">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">Stock Inventory</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            {isLoading ? "Loading…" : `${filtered.length} active items`} · Monthly inward/outward movements
-          </p>
-        </div>
-        <div className="flex gap-2">
-          {([8, 12] as const).map((n) => (
-            <button
-              key={n}
-              onClick={() => setMonths(n)}
-              className={`px-3 py-1.5 text-sm rounded-lg font-medium transition ${
-                months === n ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-              }`}
-            >
-              {n} Months
-            </button>
-          ))}
-        </div>
+      <div className="px-6 py-4 border-b border-gray-200">
+        <h1 className="text-3xl font-bold">Items</h1>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        {/* Item list */}
-        <div className="xl:col-span-1 card p-0 overflow-hidden flex flex-col" style={{ maxHeight: "75vh" }}>
-          <div className="p-3 border-b border-gray-100 bg-gray-50">
-            <div className="relative">
-              <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
-              <input
-                type="text"
-                placeholder="Search items…"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="w-full pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg bg-white"
-              />
-            </div>
+      {/* Split Panel Layout */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Left Panel - Item List (30%) */}
+        <div className="w-[30%] border-r border-gray-200 flex flex-col">
+          {/* Filters */}
+          <div className="p-4 space-y-3 border-b border-gray-200">
+            <input
+              type="text"
+              placeholder="Search items..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <select
+              value={groupFilter}
+              onChange={(e) => setGroupFilter(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">All Groups</option>
+              {groups.map((group) => (
+                <option key={group} value={group}>
+                  {group}
+                </option>
+              ))}
+            </select>
           </div>
+
+          {/* Item List */}
           <div className="flex-1 overflow-y-auto">
-            {isLoading ? (
-              Array.from({ length: 15 }).map((_, i) => (
-                <div key={i} className="px-3 py-2.5 border-b border-gray-50 animate-pulse">
-                  <div className="h-4 bg-gray-100 rounded w-3/4 mb-1" />
-                  <div className="h-3 bg-gray-100 rounded w-1/3" />
-                </div>
-              ))
-            ) : filtered.length === 0 ? (
-              <div className="px-3 py-8 text-center text-gray-400 text-sm">No items found</div>
+            {filteredItems.length === 0 ? (
+              <div className="p-4 text-center text-gray-500">No items found</div>
             ) : (
-              filtered.map((item, i) => (
+              filteredItems.map((item) => (
                 <button
-                  key={item.stock_item_name}
-                  onClick={() => { setItemIndex(i); setSelectedItem(item.stock_item_name); }}
-                  className={`w-full text-left px-3 py-2.5 border-b border-gray-50 text-sm transition ${
-                    selectedItem === item.stock_item_name
-                      ? "bg-blue-50 text-blue-800"
-                      : "hover:bg-gray-50"
-                  }`}
+                  key={item.name}
+                  onClick={() => handleSelectItem(item)}
+                  className={clsx(
+                    "w-full px-4 py-3 text-left border-b border-gray-200 hover:bg-gray-50 transition-colors",
+                    selectedItem?.name === item.name && "bg-blue-50 border-l-4 border-l-blue-500"
+                  )}
                 >
-                  <div className="font-medium truncate">{item.stock_item_name}</div>
-                  <div className="text-xs text-gray-500 mt-0.5">
-                    Balance: <span className={item.closing < 0 ? "text-red-600 font-semibold" : "text-gray-700 font-semibold"}>
-                      {formatNumber(item.closing)}
-                    </span> {item.unit || ""}
+                  <div className="font-medium text-gray-900">{item.name}</div>
+                  <div className="text-sm text-gray-500">{item.group}</div>
+                  <div className="text-sm text-gray-600 mt-1">
+                    Stock: {formatQty(item.openingQty, getItemUnitConfig(item), unitMode).formatted}
                   </div>
                 </button>
               ))
             )}
           </div>
-          <div className="px-3 py-2 border-t border-gray-100 bg-gray-50 text-xs text-gray-500">
-            {filtered.length} of {inventory.length} items
-          </div>
         </div>
 
-        {/* Detail panel */}
-        <div className="xl:col-span-2 space-y-4">
-          {!isLoading && currentItem ? (
-            <>
-              {/* Navigation header */}
-              <div className="card">
-                <div className="flex items-center justify-between mb-3">
-                  <button onClick={() => go(-1)} disabled={filtered.length <= 1}
-                    className="p-1.5 rounded-lg hover:bg-gray-100 disabled:opacity-30 transition">
-                    <ChevronLeft size={18} />
-                  </button>
-                  <div className="flex-1 text-center px-4">
-                    <div className="flex items-center justify-center gap-2">
-                      <Package size={16} className="text-blue-600" />
-                      <h2 className="text-base font-semibold">{currentItem.stock_item_name}</h2>
-                    </div>
-                    <p className="text-xs text-gray-500 mt-0.5">
-                      Item {itemIndex + 1} of {filtered.length} · Unit: {currentItem.unit || "—"}
-                    </p>
+        {/* Right Panel - Item Details (70%) */}
+        <div className="flex-1 overflow-y-auto p-6">
+          {!selectedItem ? (
+            <div className="h-full flex items-center justify-center text-gray-500">
+              Select an item to view details
+            </div>
+          ) : (
+            <div className="space-y-6 max-w-5xl">
+              {/* Item Header */}
+              <div>
+                <h2 className="text-2xl font-bold text-gray-900">{selectedItem.name}</h2>
+                <div className="mt-2 space-y-1 text-sm text-gray-600">
+                  <div>Group: {selectedItem.group}</div>
+                  {selectedItem.hsn && <div>HSN: {selectedItem.hsn}</div>}
+                  {selectedItem.gstRate !== undefined && <div>GST: {selectedItem.gstRate}%</div>}
+                  <div>
+                    Current Stock: <span className="font-semibold">{currentClosing?.formatted}</span>
                   </div>
-                  <button onClick={() => go(1)} disabled={filtered.length <= 1}
-                    className="p-1.5 rounded-lg hover:bg-gray-100 disabled:opacity-30 transition">
-                    <ChevronRight size={18} />
-                  </button>
-                </div>
-
-                {/* Summary row */}
-                <div className="grid grid-cols-4 gap-3">
-                  {[
-                    { label: "Opening", value: currentItem.opening, color: "gray" },
-                    { label: "Total Inward", value: totalInward, color: "blue" },
-                    { label: "Total Outward", value: totalOutward, color: "red" },
-                    { label: "Closing", value: currentItem.closing, color: currentItem.closing < 0 ? "red" : "green" },
-                  ].map(({ label, value, color }) => (
-                    <div key={label} className={`text-center p-2.5 rounded-lg bg-${color}-50`}>
-                      <div className={`text-xs text-${color}-600 flex items-center justify-center gap-1`}>
-                        {label === "Total Inward" && <TrendingUp size={11} />}
-                        {label === "Total Outward" && <TrendingDown size={11} />}
-                        {label}
-                      </div>
-                      <div className={`font-bold text-${color}-800 mt-0.5`}>
-                        {formatNumber(value)}
-                      </div>
-                    </div>
-                  ))}
                 </div>
               </div>
 
-              {/* Rate Override Card */}
-              <RateCard itemName={currentItem.stock_item_name} />
+              {/* Card 1: Rate Edit Card */}
+              <Card title="Pricing">
+                {!rateEditMode ? (
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <div className="text-sm text-gray-600">PKG Rate</div>
+                        <div className="text-lg font-semibold">
+                          {savedRate?.pkgRate !== undefined ? `₹${savedRate.pkgRate.toFixed(2)}` : "Not Set"}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-sm text-gray-600">Unit Rate</div>
+                        <div className="text-lg font-semibold">
+                          {savedRate?.unitRate !== undefined ? `₹${savedRate.unitRate.toFixed(2)}` : "Not Set"}
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleEditRates}
+                      className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                    >
+                      <Edit className="w-4 h-4" />
+                      Edit Rates
+                    </button>
 
-              {/* Monthly table */}
-              <div className="card p-0 overflow-hidden">
-                <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-gray-700">
-                    Monthly Movement · Last {months} Months
-                  </h3>
-                  {detailLoading && <span className="text-xs text-blue-500 animate-pulse">Refreshing…</span>}
-                </div>
+                    {/* Change Log */}
+                    {savedRate && savedRate.changeLog.length > 0 && (
+                      <div className="mt-4 border-t border-gray-200 pt-4">
+                        <button
+                          onClick={() => setShowChangeLog(!showChangeLog)}
+                          className="flex items-center gap-2 text-sm font-medium text-gray-700 hover:text-gray-900"
+                        >
+                          {showChangeLog ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                          Change History ({savedRate.changeLog.length})
+                        </button>
+                        {showChangeLog && (
+                          <div className="mt-3 space-y-2">
+                            {savedRate.changeLog.slice(-10).reverse().map((change, idx) => (
+                              <div key={idx} className="text-sm p-2 bg-gray-50 rounded">
+                                <div className="font-medium">
+                                  {change.field === "pkgRate" ? "PKG Rate" : "Unit Rate"}:{" "}
+                                  {change.oldValue !== undefined ? `₹${change.oldValue}` : "Not Set"} → ₹{change.newValue}
+                                </div>
+                                <div className="text-gray-500 text-xs">
+                                  {new Date(change.ts).toLocaleString()}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          PKG Rate (₹)
+                        </label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={localPkgRate}
+                          onChange={(e) => setLocalPkgRate(e.target.value)}
+                          className={clsx(
+                            "w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500",
+                            pkgRateChanged ? "border-amber-400" : "border-gray-300"
+                          )}
+                          placeholder="Enter PKG rate"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          Unit Rate (₹)
+                        </label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={localUnitRate}
+                          onChange={(e) => setLocalUnitRate(e.target.value)}
+                          className={clsx(
+                            "w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500",
+                            unitRateChanged ? "border-amber-400" : "border-gray-300"
+                          )}
+                          placeholder="Enter unit rate"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={handleSaveRates}
+                        className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+                      >
+                        <Save className="w-4 h-4" />
+                        Save Changes
+                      </button>
+                      <button
+                        onClick={handleDiscardRates}
+                        className="flex items-center gap-2 px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
+                      >
+                        <X className="w-4 h-4" />
+                        Discard
+                      </button>
+                      {savedRate && (
+                        <button
+                          onClick={handleDeleteRates}
+                          className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+                        >
+                          <Trash className="w-4 h-4" />
+                          Delete Override
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </Card>
+
+              {/* Card 2: Unit Config Card */}
+              <Card title="Unit Configuration">
+                {!unitEditMode ? (
+                  <div className="space-y-4">
+                    <div>
+                      <div className="text-sm text-gray-600">Current Configuration</div>
+                      {savedUnitConfig ? (
+                        <div className="mt-2">
+                          <div className="text-lg font-semibold">
+                            1 {savedUnitConfig.pkgUnit} = {savedUnitConfig.unitsPerPkg} {savedUnitConfig.baseUnit}
+                          </div>
+                          {savedUnitConfig.source === "tally" && (
+                            <span className="inline-block mt-2 px-2 py-1 bg-blue-100 text-blue-800 text-xs font-medium rounded">
+                              from Tally
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="text-gray-500 mt-2">No package configuration</div>
+                      )}
+                    </div>
+                    <button
+                      onClick={handleEditUnitConfig}
+                      className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                    >
+                      <Edit className="w-4 h-4" />
+                      Edit Config
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="space-y-3">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          Base Unit
+                        </label>
+                        <input
+                          type="text"
+                          value={localBaseUnit}
+                          onChange={(e) => setLocalBaseUnit(e.target.value)}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          placeholder="e.g., PCS, KG"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          Package Unit
+                        </label>
+                        <input
+                          type="text"
+                          value={localPkgUnit}
+                          onChange={(e) => setLocalPkgUnit(e.target.value)}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          placeholder="e.g., PKG, BOX, CARTON"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          Units per Package
+                        </label>
+                        <input
+                          type="number"
+                          step="1"
+                          value={localUnitsPerPkg}
+                          onChange={(e) => setLocalUnitsPerPkg(e.target.value)}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          placeholder="e.g., 12, 300"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Conversion Preview */}
+                    {localUnitsPerPkg && parseFloat(localUnitsPerPkg) > 0 && (
+                      <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                        <div className="text-sm font-medium text-blue-900">Preview:</div>
+                        <div className="text-sm text-blue-800 mt-1">
+                          Example: {parseFloat(localUnitsPerPkg) * 100} {localBaseUnit || "PCS"} ={" "}
+                          {(100).toFixed(2)} {localPkgUnit || "PKG"}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={handleSaveUnitConfig}
+                        className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+                      >
+                        <Save className="w-4 h-4" />
+                        Save
+                      </button>
+                      <button
+                        onClick={handleDiscardUnitConfig}
+                        className="flex items-center gap-2 px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
+                      >
+                        <X className="w-4 h-4" />
+                        Discard
+                      </button>
+                      {getUnit(selectedItem.name) && (
+                        <button
+                          onClick={handleDeleteUnitConfig}
+                          className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+                        >
+                          <Trash className="w-4 h-4" />
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </Card>
+
+              {/* Card 3: Monthly History */}
+              <Card
+                title={
+                  <div className="flex items-center justify-between">
+                    <span>Monthly History</span>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setMonthCount(8)}
+                        className={clsx(
+                          "px-3 py-1 text-sm rounded",
+                          monthCount === 8
+                            ? "bg-blue-600 text-white"
+                            : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                        )}
+                      >
+                        8 Months
+                      </button>
+                      <button
+                        onClick={() => setMonthCount(12)}
+                        className={clsx(
+                          "px-3 py-1 text-sm rounded",
+                          monthCount === 12
+                            ? "bg-blue-600 text-white"
+                            : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                        )}
+                      >
+                        12 Months
+                      </button>
+                    </div>
+                  </div>
+                }
+              >
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
-                    <thead className="bg-gray-50 border-b border-gray-100">
-                      <tr>
-                        <th className="text-left px-4 py-2.5 font-medium text-gray-500">Month</th>
-                        <th className="text-right px-4 py-2.5 font-medium text-gray-500">Opening</th>
-                        <th className="text-right px-4 py-2.5 font-medium text-blue-600">Inward (+)</th>
-                        <th className="text-right px-4 py-2.5 font-medium text-red-600">Outward (−)</th>
-                        <th className="text-right px-4 py-2.5 font-medium text-gray-700">Closing</th>
+                    <thead>
+                      <tr className="border-b border-gray-200">
+                        <th className="text-left py-2 px-3 font-semibold text-gray-700">Month</th>
+                        <th className="text-right py-2 px-3 font-semibold text-gray-700">Opening</th>
+                        <th className="text-right py-2 px-3 font-semibold text-gray-700">+Inward</th>
+                        <th className="text-right py-2 px-3 font-semibold text-gray-700">−Outward</th>
+                        <th className="text-right py-2 px-3 font-semibold text-gray-700">Closing</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {currentItem.monthly_data.map((m, i, arr) => {
-                        const prevClose = i === 0 ? currentItem.opening : arr[i - 1].closing;
+                      {monthlyHistory.map((period, idx) => {
+                        const hasActivity = period.inwardQty > 0 || period.outwardQty > 0;
+                        const monthLabel = period.periodStart.toLocaleDateString("en-US", {
+                          year: "numeric",
+                          month: "short",
+                        });
+
                         return (
-                          <tr key={m.month} className={`border-b border-gray-50 hover:bg-gray-50 ${
-                            m.inward > 0 || m.outward > 0 ? "" : "opacity-50"
-                          }`}>
-                            <td className="px-4 py-2.5 font-medium text-gray-700">
-                              <MonthLabel month={m.month} />
+                          <tr
+                            key={idx}
+                            className={clsx(
+                              "border-b border-gray-100",
+                              !hasActivity && "opacity-50"
+                            )}
+                          >
+                            <td className="py-2 px-3">{monthLabel}</td>
+                            <td className="text-right py-2 px-3">
+                              {formatQty(period.openingQty, savedUnitConfig, unitMode).formatted}
                             </td>
-                            <td className="px-4 py-2.5 text-right text-gray-500">{formatNumber(prevClose)}</td>
-                            <td className="px-4 py-2.5 text-right text-blue-700 font-medium">
-                              {m.inward > 0 ? `+${formatNumber(m.inward)}` : "—"}
+                            <td className="text-right py-2 px-3 text-green-600">
+                              {formatQty(period.inwardQty, savedUnitConfig, unitMode).formatted}
                             </td>
-                            <td className="px-4 py-2.5 text-right text-red-700 font-medium">
-                              {m.outward > 0 ? `−${formatNumber(m.outward)}` : "—"}
+                            <td className="text-right py-2 px-3 text-red-600">
+                              {formatQty(period.outwardQty, savedUnitConfig, unitMode).formatted}
                             </td>
-                            <td className={`px-4 py-2.5 text-right font-semibold ${
-                              m.closing < 0 ? "text-red-700" : "text-gray-900"
-                            }`}>
-                              {formatNumber(m.closing)}
+                            <td
+                              className={clsx(
+                                "text-right py-2 px-3 font-semibold",
+                                period.closingQty < 0 && "text-red-600"
+                              )}
+                            >
+                              {formatQty(period.closingQty, savedUnitConfig, unitMode).formatted}
                             </td>
                           </tr>
                         );
                       })}
                     </tbody>
-                    <tfoot className="bg-gray-50 border-t-2 border-gray-200">
-                      <tr>
-                        <td className="px-4 py-2.5 font-bold text-gray-700">Period Total</td>
-                        <td className="px-4 py-2.5 text-right text-gray-600">{formatNumber(currentItem.opening)}</td>
-                        <td className="px-4 py-2.5 text-right font-bold text-blue-800">+{formatNumber(totalInward)}</td>
-                        <td className="px-4 py-2.5 text-right font-bold text-red-800">−{formatNumber(totalOutward)}</td>
-                        <td className={`px-4 py-2.5 text-right font-bold ${
-                          currentItem.closing < 0 ? "text-red-700" : "text-green-700"
-                        }`}>
-                          {formatNumber(currentItem.closing)}
-                        </td>
-                      </tr>
-                    </tfoot>
                   </table>
                 </div>
-              </div>
-            </>
-          ) : !isLoading ? (
-            <div className="card flex items-center justify-center h-48 text-gray-400">
-              Select an item from the list to view its inventory
+              </Card>
             </div>
-          ) : null}
+          )}
         </div>
       </div>
+
+      {/* Toast Notification */}
+      {toast.show && (
+        <Toast
+          message={toast.message}
+          type={toast.type}
+          onClose={() => setToast({ ...toast, show: false })}
+        />
+      )}
     </div>
   );
 }

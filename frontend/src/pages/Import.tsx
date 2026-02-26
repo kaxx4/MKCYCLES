@@ -1,422 +1,578 @@
-/**
- * Import Page — enhanced with:
- * - Expandable warnings per import log
- * - MKCP data import section (PKG CONVERSION.xlsx + XML)
- * - Import report panel showing pkg_factor source breakdown
- */
-import React, { useCallback, useState } from "react";
-import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
-import {
-  AlertTriangle,
-  CheckCircle,
-  ChevronDown,
-  ChevronRight,
-  Clock,
-  Database,
-  RefreshCw,
-  Upload,
-  XCircle,
-} from "lucide-react";
-import toast from "react-hot-toast";
-import { fetchImportLogs, uploadFile, triggerRescan } from "../api/endpoints";
-import { importMkcp } from "../api/orderEndpoints";
-import { formatDate } from "../utils/format";
-import type { ImportLog } from "../types";
+import { useState, useRef, useCallback, type DragEvent, type ChangeEvent } from "react";
+import { Upload, FileText, AlertCircle, CheckCircle, Trash2, ChevronDown, ChevronRight } from "lucide-react";
+import { Card } from "../components";
+import { loadAndSanitizeXmlFile } from "../xml/sanitizer";
+import { parseTallyXml } from "../xml/parser";
+import { normalizeStockItem, normalizeLedger, normalizeUnit, normalizeVoucher } from "../xml/normalizer";
+import { getCached, setCached } from "../db/cache";
+import { useDataStore } from "../store/dataStore";
+import type { ParsedData, ImportWarning } from "../types/canonical";
 
-// ── Sub-components ────────────────────────────────────────────────────────────
+interface FileImportResult {
+  fileName: string;
+  success: boolean;
+  itemsCount: number;
+  ledgersCount: number;
+  unitsCount: number;
+  vouchersCount: number;
+  vouchersByType: Record<string, number>;
+  warnings: ImportWarning[];
+  error?: string;
+}
 
-function StatusBadge({ status }: { status: string }) {
-  if (status === "success")
-    return (
-      <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium bg-green-100 text-green-800">
-        <CheckCircle size={11} /> success
-      </span>
+export function Import() {
+  const [isDragging, setIsDragging] = useState(false);
+  const [files, setFiles] = useState<File[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [importResults, setImportResults] = useState<FileImportResult[]>([]);
+  const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+
+  const { mergeData, clearData } = useDataStore();
+
+  // Drag & Drop handlers
+  const handleDragEnter = useCallback((e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  }, []);
+
+  const handleDragOver = useCallback((e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const handleDrop = useCallback((e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+
+    const droppedFiles = Array.from(e.dataTransfer.files).filter(
+      (file) => file.name.toLowerCase().endsWith('.xml')
     );
-  if (status === "error")
-    return (
-      <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium bg-red-100 text-red-800">
-        <XCircle size={11} /> error
-      </span>
-    );
-  if (status === "partial")
-    return (
-      <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium bg-yellow-100 text-yellow-800">
-        <AlertTriangle size={11} /> partial
-      </span>
-    );
-  return (
-    <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium bg-gray-100 text-gray-700">
-      <Clock size={11} /> {status}
-    </span>
-  );
-}
 
-function LogRow({ log }: { log: ImportLog }) {
-  const [expanded, setExpanded] = useState(false);
-  let warnings: string[] = [];
-  try {
-    if (log.warnings) warnings = JSON.parse(log.warnings);
-  } catch {
-    warnings = [];
-  }
-  const hasDetails = warnings.length > 0 || !!log.error_message;
+    if (droppedFiles.length > 0) {
+      setFiles((prev) => [...prev, ...droppedFiles]);
+    }
+  }, []);
 
-  return (
-    <>
-      <tr
-        className={`border-b border-gray-50 hover:bg-gray-50 ${
-          hasDetails ? "cursor-pointer" : ""
-        } ${log.status === "error" ? "bg-red-50/30" : ""}`}
-        onClick={() => hasDetails && setExpanded((v) => !v)}
-      >
-        <td className="px-4 py-2.5 font-mono text-xs max-w-[190px]">
-          <div className="flex items-center gap-1.5">
-            {hasDetails ? (
-              expanded ? (
-                <ChevronDown size={12} className="text-gray-400 shrink-0" />
-              ) : (
-                <ChevronRight size={12} className="text-gray-400 shrink-0" />
-              )
-            ) : (
-              <span className="w-3" />
-            )}
-            <span className="truncate" title={log.file_name}>
-              {log.file_name}
-            </span>
-          </div>
-        </td>
-        <td className="px-4 py-2.5 text-xs text-gray-500 capitalize">{log.file_type}</td>
-        <td className="px-4 py-2.5 text-center">
-          <StatusBadge status={log.status} />
-        </td>
-        <td className="px-4 py-2.5 text-right text-xs text-green-700 tabular-nums">
-          {log.vouchers_inserted}
-        </td>
-        <td className="px-4 py-2.5 text-right text-xs text-blue-600 tabular-nums">
-          {log.vouchers_updated}
-        </td>
-        <td className="px-4 py-2.5 text-right text-xs text-gray-500 tabular-nums">
-          {log.masters_processed}
-        </td>
-        <td className="px-4 py-2.5 text-right text-xs text-gray-400">
-          {formatDate(log.started_at)}
-        </td>
-      </tr>
-
-      {/* Expanded: warnings */}
-      {expanded && warnings.length > 0 && (
-        <tr className="bg-amber-50/60">
-          <td colSpan={7} className="px-8 py-2 text-xs text-amber-800">
-            <div className="font-semibold mb-1 flex items-center gap-1">
-              <AlertTriangle size={11} />
-              {warnings.length} warning{warnings.length !== 1 ? "s" : ""}
-            </div>
-            <ul className="space-y-0.5 list-disc list-inside max-h-32 overflow-y-auto">
-              {warnings.map((w, i) => (
-                <li key={i} className="truncate" title={w}>
-                  {w}
-                </li>
-              ))}
-            </ul>
-          </td>
-        </tr>
-      )}
-
-      {/* Expanded: error */}
-      {expanded && log.error_message && (
-        <tr className="bg-red-50">
-          <td colSpan={7} className="px-8 py-1.5 text-xs text-red-700">
-            <span className="font-semibold">Error:</span> {log.error_message}
-          </td>
-        </tr>
-      )}
-    </>
-  );
-}
-
-// ── MKCP Report card ──────────────────────────────────────────────────────────
-
-interface MkcpReport {
-  lines: string[];
-  error?: boolean;
-}
-
-function MkcpReportCard({
-  report,
-  onDismiss,
-}: {
-  report: MkcpReport;
-  onDismiss: () => void;
-}) {
-  return (
-    <div
-      className={`mt-3 p-3 rounded-lg text-xs border ${
-        report.error
-          ? "bg-red-50 border-red-200 text-red-800"
-          : "bg-green-50 border-green-200 text-green-800"
-      }`}
-    >
-      <div className="flex items-start justify-between gap-2">
-        <div className="space-y-0.5">
-          {report.lines.filter(Boolean).map((line, i) => (
-            <div key={i}>{line}</div>
-          ))}
-        </div>
-        <button onClick={onDismiss} className="shrink-0 text-gray-400 hover:text-gray-600">
-          ✕
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ── Main Page ─────────────────────────────────────────────────────────────────
-
-export default function ImportPage() {
-  const qc = useQueryClient();
-  const [dragging, setDragging] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [mkcpReport, setMkcpReport] = useState<MkcpReport | null>(null);
-
-  // ── Tally XML import log ──────────────────────────────────────────────────
-  const { data: logs = [], isLoading: logsLoading } = useQuery({
-    queryKey: ["import-logs"],
-    queryFn: fetchImportLogs,
-    refetchInterval: 5000,
-  });
-
-  // ── Tally XML upload ──────────────────────────────────────────────────────
-  const handleFiles = useCallback(
-    async (files: FileList) => {
-      const xmlFiles = Array.from(files).filter((f) =>
-        f.name.toLowerCase().endsWith(".xml")
+  // File picker handlers
+  const handleFileSelect = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+      const selectedFiles = Array.from(e.target.files).filter(
+        (file) => file.name.toLowerCase().endsWith('.xml')
       );
-      if (!xmlFiles.length) {
-        toast.error("Please upload .xml files only");
-        return;
-      }
-      setUploading(true);
-      for (const file of xmlFiles) {
-        try {
-          const result = await uploadFile(file);
-          if (result.status === "error") {
-            toast.error(`${file.name}: ${result.error_message}`);
-          } else {
-            toast.success(
-              `${file.name}: ${result.vouchers_inserted} inserted, ${result.vouchers_updated} updated`
-            );
-          }
-        } catch {
-          toast.error(`Upload failed for ${file.name}`);
-        }
-      }
-      setUploading(false);
-      qc.invalidateQueries();
-    },
-    [qc]
-  );
+      setFiles((prev) => [...prev, ...selectedFiles]);
+    }
+  }, []);
 
-  const onDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      setDragging(false);
-      handleFiles(e.dataTransfer.files);
-    },
-    [handleFiles]
-  );
+  const handleFileButtonClick = () => {
+    fileInputRef.current?.click();
+  };
 
-  const handleRescan = async () => {
+  const handleFolderButtonClick = () => {
+    folderInputRef.current?.click();
+  };
+
+  const removeFile = (index: number) => {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  // Parse a single XML file
+  const parseXmlFile = async (file: File): Promise<FileImportResult> => {
+    const result: FileImportResult = {
+      fileName: file.name,
+      success: false,
+      itemsCount: 0,
+      ledgersCount: 0,
+      unitsCount: 0,
+      vouchersCount: 0,
+      vouchersByType: {},
+      warnings: [],
+    };
+
     try {
-      const result = await triggerRescan();
-      toast.success(result.message);
-      setTimeout(() => qc.invalidateQueries(), 2000);
-    } catch {
-      toast.error("Rescan failed");
+      // Check cache first
+      const cached = await getCached(file.name, file.lastModified);
+
+      let parsedData: ParsedData;
+
+      if (cached) {
+        parsedData = cached;
+        result.warnings.push({
+          file: file.name,
+          severity: "info",
+          element: "Cache",
+          message: "Loaded from cache",
+        });
+      } else {
+        // Read file as ArrayBuffer
+        const buffer = await file.arrayBuffer();
+
+        // Step 1: Load and sanitize
+        const sanitizedXml = loadAndSanitizeXmlFile(buffer);
+
+        // Step 2: Parse XML
+        const xmlObj = parseTallyXml(sanitizedXml);
+
+        // Step 3: Extract TALLYMESSAGE arrays
+        let tallyMessages: any[] = [];
+
+        // Check for ENVELOPE > BODY > TALLYMESSAGE structure
+        if (xmlObj.ENVELOPE?.BODY?.DATA?.TALLYMESSAGE) {
+          const tm = xmlObj.ENVELOPE.BODY.DATA.TALLYMESSAGE;
+          tallyMessages = Array.isArray(tm) ? tm : [tm];
+        } else if (xmlObj.ENVELOPE?.BODY?.TALLYMESSAGE) {
+          const tm = xmlObj.ENVELOPE.BODY.TALLYMESSAGE;
+          tallyMessages = Array.isArray(tm) ? tm : [tm];
+        } else if (xmlObj.TALLYMESSAGE) {
+          const tm = xmlObj.TALLYMESSAGE;
+          tallyMessages = Array.isArray(tm) ? tm : [tm];
+        } else if (xmlObj.ENVELOPE?.BODY) {
+          // Fallback: treat BODY as a single message
+          tallyMessages = [xmlObj.ENVELOPE.BODY];
+        }
+
+        // Step 4: Initialize ParsedData
+        parsedData = {
+          company: null,
+          ledgers: new Map(),
+          stockItems: new Map(),
+          units: new Map(),
+          vouchers: [],
+          importedAt: new Date(),
+          sourceFiles: [file.name],
+          warnings: [],
+        };
+
+        // Step 5: Process each TALLYMESSAGE
+        for (const msg of tallyMessages) {
+          // Extract company info
+          if (msg.COMPANY) {
+            const companies = Array.isArray(msg.COMPANY) ? msg.COMPANY : [msg.COMPANY];
+            for (const companyRaw of companies) {
+              if (companyRaw.NAME) {
+                parsedData.company = {
+                  name: companyRaw.NAME,
+                  gstin: companyRaw.GSTIN || companyRaw.COMPANYGSTREGISTRATIONNO,
+                  stateName: companyRaw.STATENAME,
+                  financialYearBegins: companyRaw.COMPANYFISCALYEARSTARTMONTH,
+                };
+                break;
+              }
+            }
+          }
+
+          // Extract units (must be parsed first for stock items)
+          const unitsList = msg['UNIT.LIST'] || [];
+          for (const unitRaw of unitsList) {
+            const unit = normalizeUnit(unitRaw);
+            if (unit) {
+              parsedData.units.set(unit.symbol, unit);
+            }
+          }
+
+          // Extract ledgers
+          const ledgersList = msg['LEDGER.LIST'] || [];
+          for (const ledgerRaw of ledgersList) {
+            const ledger = normalizeLedger(ledgerRaw);
+            if (ledger) {
+              parsedData.ledgers.set(ledger.nameNormalized, ledger);
+            }
+          }
+
+          // Extract stock items
+          const stockItemsList = msg['STOCKITEM.LIST'] || [];
+          for (const itemRaw of stockItemsList) {
+            const item = normalizeStockItem(itemRaw, parsedData.units);
+            if (item) {
+              parsedData.stockItems.set(item.nameNormalized, item);
+            }
+          }
+
+          // Extract vouchers
+          const vouchersList = msg['VOUCHER.LIST'] || [];
+          for (const voucherRaw of vouchersList) {
+            const voucher = normalizeVoucher(voucherRaw);
+            if (voucher) {
+              parsedData.vouchers.push(voucher);
+            }
+          }
+        }
+
+        // Cache the result
+        await setCached(file.name, file.lastModified, parsedData);
+      }
+
+      // Build result summary
+      result.success = true;
+      result.itemsCount = parsedData.stockItems.size;
+      result.ledgersCount = parsedData.ledgers.size;
+      result.unitsCount = parsedData.units.size;
+      result.vouchersCount = parsedData.vouchers.length;
+
+      // Count vouchers by type
+      for (const voucher of parsedData.vouchers) {
+        result.vouchersByType[voucher.voucherType] =
+          (result.vouchersByType[voucher.voucherType] || 0) + 1;
+      }
+
+      result.warnings = parsedData.warnings;
+
+      // Merge into data store
+      mergeData(parsedData);
+
+    } catch (error) {
+      result.success = false;
+      result.error = error instanceof Error ? error.message : String(error);
+      result.warnings.push({
+        file: file.name,
+        severity: "fatal",
+        element: "File",
+        message: result.error,
+      });
+    }
+
+    return result;
+  };
+
+  // Import all selected files
+  const handleImport = async () => {
+    if (files.length === 0) return;
+
+    setLoading(true);
+    setProgress(0);
+    setImportResults([]);
+
+    const results: FileImportResult[] = [];
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (!file) continue;
+      setProgress(((i + 1) / files.length) * 100);
+
+      const result = await parseXmlFile(file);
+      results.push(result);
+    }
+
+    setImportResults(results);
+    setLoading(false);
+    setFiles([]);
+  };
+
+  // Clear all data
+  const handleClearData = () => {
+    if (window.confirm('Are you sure you want to clear all imported data? This cannot be undone.')) {
+      clearData();
+      setImportResults([]);
+      setFiles([]);
     }
   };
 
-  // ── MKCP data import ──────────────────────────────────────────────────────
-  const mkcpMutation = useMutation({
-    mutationFn: importMkcp,
-    onSuccess: (data) => {
-      qc.invalidateQueries({ queryKey: ["order-items"] });
-      qc.invalidateQueries({ queryKey: ["order-groups"] });
-      const sc = data.counts.source_counts;
-      const lines = [
-        `✅ MKCP Import complete`,
-        `Groups: +${data.counts.groups_added} new · ${data.counts.groups_updated} updated`,
-        `Pkg Factors: +${data.counts.alt_units_added} new · ${data.counts.alt_units_updated} updated`,
-        `  Sources — xlsx: ${sc?.xlsx ?? 0}, price list: ${sc?.price_list ?? 0}`,
-        data.counts.unmatched_xlsx_items > 0
-          ? `⚠️ ${data.counts.unmatched_xlsx_items} xlsx items had no exact DB match`
-          : "✓ All xlsx items matched DB items",
-        `Item-Group: +${data.counts.item_groups_added} new · ${data.counts.item_groups_updated} updated`,
-      ];
-      setMkcpReport({ lines });
-    },
-    onError: (err: Error) =>
-      setMkcpReport({ lines: [`Import failed: ${err.message}`], error: true }),
-  });
+  // Toggle expanded row
+  const toggleRow = (index: number) => {
+    setExpandedRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) {
+        next.delete(index);
+      } else {
+        next.add(index);
+      }
+      return next;
+    });
+  };
 
-  // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div className="p-6 space-y-6 max-w-5xl">
-      {/* Header */}
+    <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Import</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            Upload Tally XML files · Import MKCP catalogue data
-          </p>
-        </div>
+        <h1 className="text-3xl font-bold text-gray-900">Import XML Data</h1>
         <button
-          onClick={handleRescan}
-          className="flex items-center gap-2 px-3 py-2 text-sm bg-white border border-gray-200 rounded-lg hover:bg-gray-50 text-gray-600"
+          onClick={handleClearData}
+          className="flex items-center gap-2 px-4 py-2 text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors"
         >
-          <RefreshCw size={14} />
-          Rescan Inbox
+          <Trash2 size={18} />
+          Clear All Data
         </button>
       </div>
 
-      {/* ── UPLOAD CARDS ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <Card>
+        {/* Drop zone */}
+        <div
+          onDragEnter={handleDragEnter}
+          onDragLeave={handleDragLeave}
+          onDragOver={handleDragOver}
+          onDrop={handleDrop}
+          className={`
+            relative border-2 border-dashed rounded-lg p-12 text-center transition-colors
+            ${isDragging
+              ? 'border-blue-500 bg-blue-50'
+              : 'border-gray-300 bg-gray-50 hover:border-gray-400'
+            }
+          `}
+        >
+          <div className="flex flex-col items-center gap-4">
+            <div className="p-4 bg-blue-100 rounded-full">
+              <Upload size={32} className="text-blue-600" />
+            </div>
 
-        {/* Tally XML */}
-        <div className="card">
-          <h2 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
-            <Upload size={16} className="text-blue-500" />
-            Tally XML Files
-          </h2>
-          <div
-            onDragEnter={() => setDragging(true)}
-            onDragLeave={() => setDragging(false)}
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={onDrop}
-            className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors ${
-              dragging
-                ? "border-blue-400 bg-blue-50"
-                : "border-gray-200 bg-gray-50 hover:border-gray-300"
-            }`}
-          >
-            <Upload
-              size={32}
-              className={`mx-auto mb-3 ${dragging ? "text-blue-500" : "text-gray-300"}`}
+            <div>
+              <p className="text-lg font-semibold text-gray-900 mb-2">
+                Drag & drop XML files here
+              </p>
+              <p className="text-sm text-gray-600 mb-4">
+                or use the buttons below to select files
+              </p>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={handleFileButtonClick}
+                className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors font-medium"
+              >
+                Select Files
+              </button>
+              <button
+                onClick={handleFolderButtonClick}
+                className="px-6 py-2.5 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition-colors font-medium"
+              >
+                Select Folder
+              </button>
+            </div>
+
+            {/* Hidden file inputs */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".xml"
+              onChange={handleFileSelect}
+              className="hidden"
             />
-            <p className="text-sm font-medium text-gray-700">
-              {uploading ? "Uploading…" : "Drop XML files here"}
-            </p>
-            <p className="text-xs text-gray-400 mt-1">
-              Master.xml · Transactions.xml
-            </p>
-            <label className="mt-4 inline-block">
-              <input
-                type="file"
-                accept=".xml"
-                multiple
-                className="hidden"
-                onChange={(e) => e.target.files && handleFiles(e.target.files)}
-                disabled={uploading}
-              />
-              <span className="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg cursor-pointer hover:bg-blue-700 transition-colors">
-                Browse files
-              </span>
-            </label>
+            <input
+              ref={folderInputRef}
+              type="file"
+              multiple
+              accept=".xml"
+              // @ts-ignore - webkitdirectory is not in standard types
+              webkitdirectory="true"
+              directory="true"
+              onChange={handleFileSelect}
+              className="hidden"
+            />
           </div>
         </div>
 
-        {/* MKCP catalogue */}
-        <div className="card">
-          <h2 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
-            <Database size={16} className="text-indigo-500" />
-            MKCP Catalogue Data
-          </h2>
+        {/* File list preview */}
+        {files.length > 0 && (
+          <div className="mt-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-3">
+              Selected Files ({files.length})
+            </h3>
+            <div className="space-y-2">
+              {files.map((file, index) => (
+                <div
+                  key={index}
+                  className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-200"
+                >
+                  <div className="flex items-center gap-3">
+                    <FileText size={20} className="text-gray-600" />
+                    <div>
+                      <p className="text-sm font-medium text-gray-900">{file.name}</p>
+                      <p className="text-xs text-gray-500">
+                        {(file.size / 1024).toFixed(2)} KB
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => removeFile(index)}
+                    className="p-1.5 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              ))}
+            </div>
 
-          <div className="bg-indigo-50 rounded-xl p-3 space-y-1.5 text-xs text-indigo-800 mb-3">
-            <p className="font-semibold text-indigo-700">
-              Reads from Desktop/MKCP/:
-            </p>
-            {[
-              ["PKG CONVERSION.xlsx", "Package factors (PRIMARY source)"],
-              ["PRICE LIST ST.xml", "Package factors (fallback)"],
-              ["STOCK GROUPS.xml", "Vendor group definitions"],
-              ["STOCK ITEM.xml", "Item → group mappings"],
-            ].map(([file, desc]) => (
-              <div key={file} className="flex items-start gap-1.5">
-                <span className="mt-1 w-1.5 h-1.5 rounded-full bg-indigo-400 shrink-0" />
-                <span>
-                  <strong>{file}</strong> — {desc}
-                </span>
+            <button
+              onClick={handleImport}
+              disabled={loading}
+              className="mt-4 w-full px-6 py-3 bg-green-600 hover:bg-green-700 disabled:bg-gray-400 text-white rounded-lg transition-colors font-semibold"
+            >
+              {loading ? 'Importing...' : `Import ${files.length} File${files.length > 1 ? 's' : ''}`}
+            </button>
+
+            {/* Progress bar */}
+            {loading && (
+              <div className="mt-4">
+                <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-green-600 transition-all duration-300"
+                    style={{ width: `${progress}%` }}
+                  />
+                </div>
+                <p className="text-sm text-gray-600 text-center mt-2">
+                  {Math.round(progress)}% complete
+                </p>
               </div>
-            ))}
-          </div>
-
-          <button
-            onClick={() => mkcpMutation.mutate()}
-            disabled={mkcpMutation.isPending}
-            className="w-full flex items-center justify-center gap-2 py-2.5 text-sm font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-60 transition-colors"
-          >
-            <RefreshCw
-              size={14}
-              className={mkcpMutation.isPending ? "animate-spin" : ""}
-            />
-            {mkcpMutation.isPending ? "Importing…" : "Run MKCP Import"}
-          </button>
-
-          {mkcpReport && (
-            <MkcpReportCard
-              report={mkcpReport}
-              onDismiss={() => setMkcpReport(null)}
-            />
-          )}
-        </div>
-      </div>
-
-      {/* ── IMPORT LOG ── */}
-      <div className="card p-0 overflow-hidden">
-        <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-gray-700">
-            Import History
-            {logs.length > 0 && (
-              <span className="ml-2 text-xs font-normal text-gray-400">
-                ({logs.length} files)
-              </span>
             )}
-          </h2>
-          <div className="flex gap-3 text-xs text-gray-400">
-            <span>Click a row to expand warnings</span>
           </div>
+        )}
+      </Card>
+
+      {/* Import results table */}
+      {importResults.length > 0 && (
+        <Card title="Import Results">
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-gray-50 border-b border-gray-200">
+                <tr>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                    File Name
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                    Status
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                    Masters
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                    Vouchers
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                    Warnings
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {importResults.map((result, index) => (
+                  <>
+                    <tr key={index} className="hover:bg-gray-50">
+                      <td className="px-4 py-3 text-sm text-gray-900">
+                        {result.fileName}
+                      </td>
+                      <td className="px-4 py-3">
+                        {result.success ? (
+                          <div className="flex items-center gap-2 text-green-600">
+                            <CheckCircle size={16} />
+                            <span className="text-sm font-medium">Success</span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2 text-red-600">
+                            <AlertCircle size={16} />
+                            <span className="text-sm font-medium">Failed</span>
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-sm text-gray-700">
+                        <div className="space-y-0.5">
+                          <div>Items: <span className="font-medium">{result.itemsCount}</span></div>
+                          <div>Ledgers: <span className="font-medium">{result.ledgersCount}</span></div>
+                          <div>Units: <span className="font-medium">{result.unitsCount}</span></div>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-sm text-gray-700">
+                        <div className="space-y-0.5">
+                          <div>Total: <span className="font-medium">{result.vouchersCount}</span></div>
+                          {Object.entries(result.vouchersByType)
+                            .sort((a, b) => b[1] - a[1])
+                            .slice(0, 3)
+                            .map(([type, count]) => (
+                              <div key={type}>
+                                {type}: <span className="font-medium">{count}</span>
+                              </div>
+                            ))}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        {result.warnings.length > 0 ? (
+                          <button
+                            onClick={() => toggleRow(index)}
+                            className="flex items-center gap-1 text-sm text-amber-600 hover:text-amber-700"
+                          >
+                            {expandedRows.has(index) ? (
+                              <ChevronDown size={16} />
+                            ) : (
+                              <ChevronRight size={16} />
+                            )}
+                            <span className="font-medium">{result.warnings.length} warning{result.warnings.length > 1 ? 's' : ''}</span>
+                          </button>
+                        ) : (
+                          <span className="text-sm text-gray-500">None</span>
+                        )}
+                      </td>
+                    </tr>
+
+                    {/* Expanded warnings row */}
+                    {expandedRows.has(index) && result.warnings.length > 0 && (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-3 bg-amber-50">
+                          <div className="space-y-2">
+                            {result.warnings.map((warning, wIndex) => (
+                              <div
+                                key={wIndex}
+                                className="flex items-start gap-2 text-sm"
+                              >
+                                <AlertCircle
+                                  size={16}
+                                  className={
+                                    warning.severity === 'fatal'
+                                      ? 'text-red-600 mt-0.5'
+                                      : warning.severity === 'warn'
+                                      ? 'text-amber-600 mt-0.5'
+                                      : 'text-blue-600 mt-0.5'
+                                  }
+                                />
+                                <div>
+                                  <p className="font-medium text-gray-900">
+                                    {warning.element}
+                                  </p>
+                                  <p className="text-gray-700">{warning.message}</p>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {/* Instructions */}
+      <Card title="Import Instructions">
+        <div className="prose prose-sm max-w-none text-gray-700">
+          <p className="mb-4">
+            This page allows you to import Tally ERP XML data into the application. You can import data in three ways:
+          </p>
+          <ul className="list-disc list-inside space-y-2 mb-4">
+            <li><strong>Drag & Drop:</strong> Drag XML files directly onto the drop zone</li>
+            <li><strong>File Picker:</strong> Click "Select Files" to choose individual XML files</li>
+            <li><strong>Folder Picker:</strong> Click "Select Folder" to import all XML files from a directory</li>
+          </ul>
+          <p className="mb-4">
+            <strong>Supported data types:</strong> Stock Items, Ledgers, Units, and Vouchers (Sales, Purchase, etc.)
+          </p>
+          <p className="text-amber-700 mb-4">
+            <strong>Note:</strong> Files are automatically cached for faster subsequent imports. The cache expires after 24 hours.
+          </p>
+          <p className="text-red-700">
+            <strong>Warning:</strong> The "Clear All Data" button will permanently delete all imported data from the application.
+          </p>
         </div>
-        <table className="w-full">
-          <thead className="border-b border-gray-100 bg-gray-50/50">
-            <tr>
-              <th className="text-left px-4 py-2.5 text-xs text-gray-500 font-medium">File</th>
-              <th className="text-left px-4 py-2.5 text-xs text-gray-500 font-medium">Type</th>
-              <th className="text-center px-4 py-2.5 text-xs text-gray-500 font-medium">Status</th>
-              <th className="text-right px-4 py-2.5 text-xs text-gray-500 font-medium">Inserted</th>
-              <th className="text-right px-4 py-2.5 text-xs text-gray-500 font-medium">Updated</th>
-              <th className="text-right px-4 py-2.5 text-xs text-gray-500 font-medium">Masters</th>
-              <th className="text-right px-4 py-2.5 text-xs text-gray-500 font-medium">Date</th>
-            </tr>
-          </thead>
-          <tbody>
-            {logsLoading ? (
-              <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-gray-400 text-sm">
-                  Loading…
-                </td>
-              </tr>
-            ) : logs.length === 0 ? (
-              <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-gray-400 text-sm">
-                  No imports yet. Drop XML files above to get started.
-                </td>
-              </tr>
-            ) : (
-              logs.map((log: ImportLog) => <LogRow key={log.id} log={log} />)
-            )}
-          </tbody>
-        </table>
-      </div>
+      </Card>
     </div>
   );
 }

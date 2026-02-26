@@ -1,53 +1,61 @@
-import React from "react";
+import type { ReactNode } from "react";
+import { TrendingUp, TrendingDown } from "lucide-react";
 import clsx from "clsx";
-
-// ── Indian GAAP color guide ────────────────────────────────────────────────────
-//   green  → Income / Profit  (Sales revenue, Net Profit when +ve)
-//   red    → Loss / Negative  (Net Profit when -ve, overdue aging)
-//   blue   → Asset / Inflow   (Receivables, GST ITC claimable)
-//   orange → Liability / Cost (Payables to vendors, Purchases COGS)
-//   purple → Pass-through Tax (GST Output collected — belongs to Govt)
-//   yellow → Advisory watch   (General alerts, non-critical flags)
-// ──────────────────────────────────────────────────────────────────────────────
 
 interface KPICardProps {
   title: string;
-  value: string;
-  subtitle?: string;
-  color?: "blue" | "green" | "red" | "yellow" | "purple" | "orange";
-  icon?: React.ReactNode;
+  value: string | number;
+  change?: number;
+  icon?: ReactNode;
+  color?: "blue" | "green" | "amber" | "red" | "gray";
 }
 
-const colorMap: Record<string, string> = {
-  blue:   "text-blue-600 bg-blue-50",
-  green:  "text-green-600 bg-green-50",
-  red:    "text-red-600 bg-red-50",
-  yellow: "text-yellow-600 bg-yellow-50",
-  purple: "text-purple-600 bg-purple-50",
-  orange: "text-orange-600 bg-orange-50",
-};
-
-export default function KPICard({
+export function KPICard({
   title,
   value,
-  subtitle,
-  color = "blue",
+  change,
   icon,
+  color = "blue",
 }: KPICardProps) {
+  const colorClasses = {
+    blue: "bg-blue-50 text-blue-600",
+    green: "bg-green-50 text-green-600",
+    amber: "bg-amber-50 text-amber-600",
+    red: "bg-red-50 text-red-600",
+    gray: "bg-gray-50 text-gray-600",
+  };
+
+  const isPositive = change !== undefined && change >= 0;
+  const showTrend = change !== undefined && change !== 0;
+
   return (
-    <div className="card hover:shadow-md transition-shadow">
-      <div className="flex items-start justify-between">
-        <div>
-          <p className="text-sm font-medium text-gray-500">{title}</p>
-          <p className={clsx("text-2xl font-bold mt-1", colorMap[color].split(" ")[0])}>
-            {value}
-          </p>
-          {subtitle && (
-            <p className="text-xs text-gray-400 mt-1">{subtitle}</p>
+    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+      <div className="flex items-center justify-between">
+        <div className="flex-1">
+          <p className="text-sm font-medium text-gray-600">{title}</p>
+          <p className="mt-2 text-3xl font-semibold text-gray-900">{value}</p>
+          {showTrend && (
+            <div className="mt-2 flex items-center gap-1">
+              {isPositive ? (
+                <TrendingUp className="w-4 h-4 text-green-600" />
+              ) : (
+                <TrendingDown className="w-4 h-4 text-red-600" />
+              )}
+              <span
+                className={clsx(
+                  "text-sm font-medium",
+                  isPositive ? "text-green-600" : "text-red-600"
+                )}
+              >
+                {isPositive ? "+" : ""}
+                {change.toFixed(1)}%
+              </span>
+              <span className="text-sm text-gray-500">vs last period</span>
+            </div>
           )}
         </div>
         {icon && (
-          <div className={clsx("p-2 rounded-lg", colorMap[color])}>
+          <div className={clsx("p-3 rounded-lg", colorClasses[color])}>
             {icon}
           </div>
         )}

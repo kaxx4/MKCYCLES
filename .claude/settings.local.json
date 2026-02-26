@@ -45,7 +45,14 @@
       "Bash(.venv/Scripts/python.exe -c \"import openpyxl; print\\(''openpyxl OK'', openpyxl.__version__\\)\")",
       "Bash(.venv/Scripts/python.exe -c \":*)",
       "Bash(wc:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(npm create vite:*)",
+      "Bash(npm install:*)",
+      "Bash(npx tailwindcss:*)",
+      "Bash(node:*)",
+      "Bash(npm run type-check:*)",
+      "Bash(npm run:*)",
+      "Bash(npm uninstall:*)"
     ]
   }
 }

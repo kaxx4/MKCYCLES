@@ -4,24 +4,28 @@
 
 @layer base {
   body {
-    @apply bg-gray-50 text-gray-900 font-sans;
+    @apply font-sans antialiased bg-gray-50 text-gray-900;
+  }
+
+  * {
+    @apply tabular-nums;
   }
 }
 
 @layer components {
   .card {
-    @apply bg-white rounded-xl shadow-sm border border-gray-200 p-6;
+    @apply bg-white rounded-xl border border-gray-100 shadow-sm p-4;
   }
+
   .btn {
-    @apply inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors;
+    @apply px-4 py-2 rounded-lg font-medium transition-colors duration-200;
   }
+
   .btn-primary {
-    @apply btn bg-blue-600 text-white hover:bg-blue-700;
+    @apply bg-brand-500 text-white hover:bg-brand-700;
   }
+
   .btn-secondary {
-    @apply btn bg-gray-100 text-gray-700 hover:bg-gray-200;
-  }
-  .badge {
-    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+    @apply bg-gray-200 text-gray-700 hover:bg-gray-300;
   }
 }

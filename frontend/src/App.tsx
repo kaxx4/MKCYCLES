@@ -1,33 +1,30 @@
-import React from "react";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
-import Layout from "./components/Layout";
-import Dashboard from "./pages/Dashboard";
-import Vouchers from "./pages/Vouchers";
-import Customers from "./pages/Customers";
-import Items from "./pages/Items";
-import ImportPage from "./pages/Import";
-import Settings from "./pages/Settings";
-import Orders from "./pages/Orders";
-import AdvancedOrders from "./pages/AdvancedOrders";
-import { UnitsProvider } from "./context/UnitsContext";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { ErrorBoundary, Layout } from "./components";
+import { Dashboard } from "./pages/Dashboard";
+import { Invoices } from "./pages/Invoices";
+import { Items } from "./pages/Items";
+import { Orders } from "./pages/Orders";
+import { Import } from "./pages/Import";
+import { Settings } from "./pages/Settings";
 
-export default function App() {
+function App() {
   return (
-    <UnitsProvider>
+    <ErrorBoundary>
       <BrowserRouter>
-        <Routes>
-          <Route element={<Layout />}>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/vouchers" element={<Vouchers />} />
-            <Route path="/customers" element={<Customers />} />
+        <Layout>
+          <Routes>
+            <Route path="/" element={<Navigate to="/dashboard" replace />} />
+            <Route path="/dashboard" element={<Dashboard />} />
+            <Route path="/invoices" element={<Invoices />} />
             <Route path="/items" element={<Items />} />
             <Route path="/orders" element={<Orders />} />
-            <Route path="/advanced-orders" element={<AdvancedOrders />} />
-            <Route path="/import" element={<ImportPage />} />
+            <Route path="/import" element={<Import />} />
             <Route path="/settings" element={<Settings />} />
-          </Route>
-        </Routes>
+          </Routes>
+        </Layout>
       </BrowserRouter>
-    </UnitsProvider>
+    </ErrorBoundary>
   );
 }
+
+export default App;
