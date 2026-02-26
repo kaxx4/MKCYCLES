@@ -1,0 +1,23 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libxml2-dev libxslt-dev gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY backend/ .
+
+# Create data directories
+RUN mkdir -p /data/tally_inbox /data/raw_backup logs
+
+ENV TALLY_INBOX=/data/tally_inbox
+ENV DATABASE_URL=sqlite:////data/tally_dashboard.db
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

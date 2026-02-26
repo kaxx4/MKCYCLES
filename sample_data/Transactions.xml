@@ -1,0 +1,289 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ENVELOPE>
+  <HEADER>
+    <TALLYREQUEST>Import Data</TALLYREQUEST>
+  </HEADER>
+  <BODY>
+    <IMPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>Vouchers</REPORTNAME>
+      </REQUESTDESC>
+      <REQUESTDATA>
+        <TALLYMESSAGE xmlns:UDF="TallyUDF">
+
+          <!-- ================================================================
+               VOUCHER 1: Sales Invoice to Acme Corp (intra-state, CGST+SGST)
+               ================================================================ -->
+          <VOUCHER VOUCHERTYPENAME="Sales" VOUCHERNUMBER="SI/2024/001" DATE="20240415">
+            <DATE>20240415</DATE>
+            <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+            <VOUCHERNUMBER>SI/2024/001</VOUCHERNUMBER>
+            <PARTYNAME>Acme Corp</PARTYNAME>
+            <PARTYLEDGERNAME>Acme Corp</PARTYLEDGERNAME>
+            <PLACEOFSUPPLY>Karnataka</PLACEOFSUPPLY>
+            <BILLTOPLACE>Pune</BILLTOPLACE>
+            <GSTREGISTRATIONNUMBER>29AABCD1234E1Z5</GSTREGISTRATIONNUMBER>
+            <IRN>a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f601</IRN>
+            <IRNACKNO>231912345678901</IRNACKNO>
+            <IRNACKDATE>20240415</IRNACKDATE>
+            <NARRATION>Sales of Widget Alpha and Widget Beta to Acme Corp</NARRATION>
+
+            <!-- Party ledger debit -->
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Acme Corp</LEDGERNAME>
+              <AMOUNT>-70800</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+
+            <!-- Sales credit -->
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Sales - Domestic</LEDGERNAME>
+              <AMOUNT>60000</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+
+            <!-- CGST 9% -->
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>CGST</LEDGERNAME>
+              <AMOUNT>5400</AMOUNT>
+              <TAXTYPE>CGST</TAXTYPE>
+              <TAXRATE>9</TAXRATE>
+            </ALLLEDGERENTRIES.LIST>
+
+            <!-- SGST 9% -->
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>SGST</LEDGERNAME>
+              <AMOUNT>5400</AMOUNT>
+              <TAXTYPE>SGST</TAXTYPE>
+              <TAXRATE>9</TAXRATE>
+            </ALLLEDGERENTRIES.LIST>
+
+            <!-- Inventory lines -->
+            <INVENTORYENTRIES.LIST>
+              <STOCKITEMNAME>Widget Alpha</STOCKITEMNAME>
+              <ACTUALQTY>25</ACTUALQTY>
+              <BILLEDQTY>25</BILLEDQTY>
+              <UNIT>Nos</UNIT>
+              <RATE>1200</RATE>
+              <AMOUNT>-30000</AMOUNT>
+            </INVENTORYENTRIES.LIST>
+
+            <INVENTORYENTRIES.LIST>
+              <STOCKITEMNAME>Widget Beta</STOCKITEMNAME>
+              <ACTUALQTY>35</ACTUALQTY>
+              <BILLEDQTY>35</BILLEDQTY>
+              <UNIT>Nos</UNIT>
+              <RATE>857.14</RATE>
+              <AMOUNT>-30000</AMOUNT>
+            </INVENTORYENTRIES.LIST>
+          </VOUCHER>
+
+          <!-- ================================================================
+               VOUCHER 2: Sales Invoice to Globex Industries (inter-state, IGST)
+               ================================================================ -->
+          <VOUCHER VOUCHERTYPENAME="Sales" VOUCHERNUMBER="SI/2024/002" DATE="20240420">
+            <DATE>20240420</DATE>
+            <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+            <VOUCHERNUMBER>SI/2024/002</VOUCHERNUMBER>
+            <PARTYNAME>Globex Industries</PARTYNAME>
+            <PARTYLEDGERNAME>Globex Industries</PARTYLEDGERNAME>
+            <PLACEOFSUPPLY>Tamil Nadu</PLACEOFSUPPLY>
+            <BILLTOPLACE>Chennai</BILLTOPLACE>
+            <GSTREGISTRATIONNUMBER>29AABCD1234E1Z5</GSTREGISTRATIONNUMBER>
+            <IRN>b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6b202</IRN>
+            <NARRATION>Interstate sales of Industrial Cable to Globex Industries</NARRATION>
+
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Globex Industries</LEDGERNAME>
+              <AMOUNT>-112000</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Sales - Interstate</LEDGERNAME>
+              <AMOUNT>100000</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+
+            <!-- IGST 12% -->
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>IGST</LEDGERNAME>
+              <AMOUNT>12000</AMOUNT>
+              <TAXTYPE>IGST</TAXTYPE>
+              <TAXRATE>12</TAXRATE>
+            </ALLLEDGERENTRIES.LIST>
+
+            <INVENTORYENTRIES.LIST>
+              <STOCKITEMNAME>Industrial Cable 1M</STOCKITEMNAME>
+              <ACTUALQTY>400</ACTUALQTY>
+              <BILLEDQTY>400</BILLEDQTY>
+              <UNIT>Nos</UNIT>
+              <RATE>250</RATE>
+              <AMOUNT>-100000</AMOUNT>
+            </INVENTORYENTRIES.LIST>
+          </VOUCHER>
+
+          <!-- ================================================================
+               VOUCHER 3: Purchase from Bharat Suppliers
+               ================================================================ -->
+          <VOUCHER VOUCHERTYPENAME="Purchase" VOUCHERNUMBER="PUR/2024/001" DATE="20240410">
+            <DATE>20240410</DATE>
+            <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+            <VOUCHERNUMBER>PUR/2024/001</VOUCHERNUMBER>
+            <PARTYNAME>Bharat Suppliers</PARTYNAME>
+            <PARTYLEDGERNAME>Bharat Suppliers</PARTYLEDGERNAME>
+            <PLACEOFSUPPLY>Delhi</PLACEOFSUPPLY>
+            <NARRATION>Purchase of Raw Material X - 500 Kgs</NARRATION>
+            <REFERENCE>INV-BS-20240410</REFERENCE>
+
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Bharat Suppliers</LEDGERNAME>
+              <AMOUNT>94500</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Purchases</LEDGERNAME>
+              <AMOUNT>-90000</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+
+            <!-- IGST 5% on raw material -->
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>IGST</LEDGERNAME>
+              <AMOUNT>-4500</AMOUNT>
+              <TAXTYPE>IGST</TAXTYPE>
+              <TAXRATE>5</TAXRATE>
+            </ALLLEDGERENTRIES.LIST>
+
+            <INVENTORYENTRIES.LIST>
+              <STOCKITEMNAME>Raw Material X</STOCKITEMNAME>
+              <ACTUALQTY>500</ACTUALQTY>
+              <BILLEDQTY>500</BILLEDQTY>
+              <UNIT>Kgs</UNIT>
+              <RATE>180</RATE>
+              <AMOUNT>90000</AMOUNT>
+            </INVENTORYENTRIES.LIST>
+          </VOUCHER>
+
+          <!-- ================================================================
+               VOUCHER 4: Receipt from TechStart Solutions
+               ================================================================ -->
+          <VOUCHER VOUCHERTYPENAME="Receipt" VOUCHERNUMBER="REC/2024/001" DATE="20240425">
+            <DATE>20240425</DATE>
+            <VOUCHERTYPENAME>Receipt</VOUCHERTYPENAME>
+            <VOUCHERNUMBER>REC/2024/001</VOUCHERNUMBER>
+            <PARTYNAME>TechStart Solutions</PARTYNAME>
+            <NARRATION>Payment received for Invoice SI/2024/003</NARRATION>
+
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>HDFC Bank Current A/c</LEDGERNAME>
+              <AMOUNT>-45000</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>TechStart Solutions</LEDGERNAME>
+              <AMOUNT>45000</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+          </VOUCHER>
+
+          <!-- ================================================================
+               VOUCHER 5: Sales Invoice - TechStart Solutions (with small data issue)
+               ================================================================ -->
+          <VOUCHER VOUCHERTYPENAME="Sales" VOUCHERNUMBER="SI/2024/003" DATE="20240501">
+            <DATE>20240501</DATE>
+            <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+            <VOUCHERNUMBER>SI/2024/003</VOUCHERNUMBER>
+            <PARTYNAME>TechStart Solutions</PARTYNAME>
+            <PARTYLEDGERNAME>TechStart Solutions</PARTYLEDGERNAME>
+            <PLACEOFSUPPLY>Karnataka</PLACEOFSUPPLY>
+            <BILLTOPLACE>Bengaluru</BILLTOPLACE>
+            <GSTREGISTRATIONNUMBER>29AABCD1234E1Z5</GSTREGISTRATIONNUMBER>
+            <IRN>c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6c3d403</IRN>
+            <NARRATION>Software peripherals supply - mixed items</NARRATION>
+
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>TechStart Solutions</LEDGERNAME>
+              <AMOUNT>-56700</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Sales - Domestic</LEDGERNAME>
+              <AMOUNT>48050</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>CGST</LEDGERNAME>
+              <AMOUNT>4325</AMOUNT>
+              <TAXTYPE>CGST</TAXTYPE>
+              <TAXRATE>9</TAXRATE>
+            </ALLLEDGERENTRIES.LIST>
+
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>SGST</LEDGERNAME>
+              <AMOUNT>4325</AMOUNT>
+              <TAXTYPE>SGST</TAXTYPE>
+              <TAXRATE>9</TAXRATE>
+            </ALLLEDGERENTRIES.LIST>
+
+            <INVENTORYENTRIES.LIST>
+              <STOCKITEMNAME>Widget Alpha</STOCKITEMNAME>
+              <ACTUALQTY>10</ACTUALQTY>
+              <UNIT>Nos</UNIT>
+              <RATE>1200</RATE>
+              <AMOUNT>-12000</AMOUNT>
+            </INVENTORYENTRIES.LIST>
+
+            <INVENTORYENTRIES.LIST>
+              <STOCKITEMNAME>Industrial Cable 1M</STOCKITEMNAME>
+              <ACTUALQTY>145</ACTUALQTY>
+              <UNIT>Nos</UNIT>
+              <RATE>250</RATE>
+              <AMOUNT>-36050</AMOUNT>
+            </INVENTORYENTRIES.LIST>
+          </VOUCHER>
+
+          <!-- ================================================================
+               VOUCHER 6: Purchase from Sri Ram Distributors
+               ================================================================ -->
+          <VOUCHER VOUCHERTYPENAME="Purchase" VOUCHERNUMBER="PUR/2024/002" DATE="20240505">
+            <DATE>20240505</DATE>
+            <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+            <VOUCHERNUMBER>PUR/2024/002</VOUCHERNUMBER>
+            <PARTYNAME>Sri Ram Distributors</PARTYNAME>
+            <PARTYLEDGERNAME>Sri Ram Distributors</PARTYLEDGERNAME>
+            <PLACEOFSUPPLY>Karnataka</PLACEOFSUPPLY>
+            <NARRATION>Purchase of packaging materials</NARRATION>
+
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Sri Ram Distributors</LEDGERNAME>
+              <AMOUNT>56000</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Purchases</LEDGERNAME>
+              <AMOUNT>-50000</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>CGST</LEDGERNAME>
+              <AMOUNT>-3000</AMOUNT>
+              <TAXTYPE>CGST</TAXTYPE>
+              <TAXRATE>6</TAXRATE>
+            </ALLLEDGERENTRIES.LIST>
+
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>SGST</LEDGERNAME>
+              <AMOUNT>-3000</AMOUNT>
+              <TAXTYPE>SGST</TAXTYPE>
+              <TAXRATE>6</TAXRATE>
+            </ALLLEDGERENTRIES.LIST>
+
+            <INVENTORYENTRIES.LIST>
+              <STOCKITEMNAME>Packaging Box</STOCKITEMNAME>
+              <ACTUALQTY>1000</ACTUALQTY>
+              <UNIT>Box</UNIT>
+              <RATE>50</RATE>
+              <AMOUNT>50000</AMOUNT>
+            </INVENTORYENTRIES.LIST>
+          </VOUCHER>
+
+        </TALLYMESSAGE>
+      </REQUESTDATA>
+    </IMPORTDATA>
+  </BODY>
+</ENVELOPE>

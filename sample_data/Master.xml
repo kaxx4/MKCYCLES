@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ENVELOPE>
+  <HEADER>
+    <TALLYREQUEST>Import Data</TALLYREQUEST>
+  </HEADER>
+  <BODY>
+    <IMPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>All Masters</REPORTNAME>
+      </REQUESTDESC>
+      <REQUESTDATA>
+        <TALLYMESSAGE xmlns:UDF="TallyUDF">
+
+          <!-- ================================================================
+               COMPANY
+               ================================================================ -->
+          <COMPANY NAME="Demo Traders Pvt Ltd">
+            <BASICCOMPANYNAME>Demo Traders Pvt Ltd</BASICCOMPANYNAME>
+            <GSTIN>29AABCD1234E1Z5</GSTIN>
+            <ADDRESS>42, MG Road, Bengaluru</ADDRESS>
+            <BASICCOMPANYSTATE>Karnataka</BASICCOMPANYSTATE>
+            <PINCODE>560001</PINCODE>
+            <EMAIL>accounts@demotraders.in</EMAIL>
+            <PHONE>+91-80-12345678</PHONE>
+          </COMPANY>
+
+          <!-- ================================================================
+               UNITS
+               ================================================================ -->
+          <UNIT NAME="Nos">
+            <ORIGINALNAME>Nos</ORIGINALNAME>
+            <FORMALNAME>Numbers</FORMALNAME>
+            <ISSIMPLEUNIT>Yes</ISSIMPLEUNIT>
+          </UNIT>
+
+          <UNIT NAME="Kgs">
+            <ORIGINALNAME>Kgs</ORIGINALNAME>
+            <FORMALNAME>Kilograms</FORMALNAME>
+            <ISSIMPLEUNIT>Yes</ISSIMPLEUNIT>
+          </UNIT>
+
+          <UNIT NAME="Box">
+            <ORIGINALNAME>Box</ORIGINALNAME>
+            <FORMALNAME>Boxes</FORMALNAME>
+            <ISSIMPLEUNIT>Yes</ISSIMPLEUNIT>
+          </UNIT>
+
+          <!-- ================================================================
+               LEDGERS
+               ================================================================ -->
+          <!-- Sundry Debtors -->
+          <LEDGER NAME="Acme Corp">
+            <PARENT>Sundry Debtors</PARENT>
+            <MAILINGNAME>Acme Corporation Ltd</MAILINGNAME>
+            <PARTYGSTIN>27AABCE5670F1Z3</PARTYGSTIN>
+            <EMAIL>finance@acmecorp.com</EMAIL>
+            <ADDRESS>Plot 5, MIDC, Pune</ADDRESS>
+            <STATENAME>Maharashtra</STATENAME>
+            <PINCODE>411001</PINCODE>
+            <OPENINGBALANCE>50000</OPENINGBALANCE>
+          </LEDGER>
+
+          <LEDGER NAME="Globex Industries">
+            <PARENT>Sundry Debtors</PARENT>
+            <MAILINGNAME>Globex Industries Pvt Ltd</MAILINGNAME>
+            <PARTYGSTIN>33AABCG7890H2Z1</PARTYGSTIN>
+            <EMAIL>accounts@globexind.com</EMAIL>
+            <ADDRESS>100, Anna Salai, Chennai</ADDRESS>
+            <STATENAME>Tamil Nadu</STATENAME>
+            <PINCODE>600002</PINCODE>
+            <OPENINGBALANCE>75000</OPENINGBALANCE>
+          </LEDGER>
+
+          <LEDGER NAME="TechStart Solutions">
+            <PARENT>Sundry Debtors</PARENT>
+            <MAILINGNAME>TechStart Solutions LLP</MAILINGNAME>
+            <PARTYGSTIN>29AABCT1122K3Z7</PARTYGSTIN>
+            <ADDRESS>Whitefield, Bengaluru</ADDRESS>
+            <STATENAME>Karnataka</STATENAME>
+            <PINCODE>560066</PINCODE>
+            <OPENINGBALANCE>0</OPENINGBALANCE>
+          </LEDGER>
+
+          <!-- Sundry Creditors -->
+          <LEDGER NAME="Bharat Suppliers">
+            <PARENT>Sundry Creditors</PARENT>
+            <MAILINGNAME>Bharat Suppliers &amp; Co</MAILINGNAME>
+            <PARTYGSTIN>09AABCB3344M4Z2</PARTYGSTIN>
+            <ADDRESS>Nehru Place, New Delhi</ADDRESS>
+            <STATENAME>Delhi</STATENAME>
+            <PINCODE>110019</PINCODE>
+            <OPENINGBALANCE>-30000</OPENINGBALANCE>
+          </LEDGER>
+
+          <LEDGER NAME="Sri Ram Distributors">
+            <PARENT>Sundry Creditors</PARENT>
+            <MAILINGNAME>Sri Ram Distributors</MAILINGNAME>
+            <PARTYGSTIN>29AABCS5566N5Z9</PARTYGSTIN>
+            <ADDRESS>KR Market, Bengaluru</ADDRESS>
+            <STATENAME>Karnataka</STATENAME>
+            <PINCODE>560002</PINCODE>
+            <OPENINGBALANCE>-15000</OPENINGBALANCE>
+          </LEDGER>
+
+          <!-- Sales ledgers -->
+          <LEDGER NAME="Sales - Domestic">
+            <PARENT>Sales Accounts</PARENT>
+            <OPENINGBALANCE>0</OPENINGBALANCE>
+          </LEDGER>
+
+          <LEDGER NAME="Sales - Interstate">
+            <PARENT>Sales Accounts</PARENT>
+            <OPENINGBALANCE>0</OPENINGBALANCE>
+          </LEDGER>
+
+          <!-- Purchase ledgers -->
+          <LEDGER NAME="Purchases">
+            <PARENT>Purchase Accounts</PARENT>
+            <OPENINGBALANCE>0</OPENINGBALANCE>
+          </LEDGER>
+
+          <!-- GST / Tax Ledgers -->
+          <LEDGER NAME="CGST">
+            <PARENT>Duties &amp; Taxes</PARENT>
+            <TAXTYPE>GST</TAXTYPE>
+            <OPENINGBALANCE>0</OPENINGBALANCE>
+          </LEDGER>
+
+          <LEDGER NAME="SGST">
+            <PARENT>Duties &amp; Taxes</PARENT>
+            <TAXTYPE>GST</TAXTYPE>
+            <OPENINGBALANCE>0</OPENINGBALANCE>
+          </LEDGER>
+
+          <LEDGER NAME="IGST">
+            <PARENT>Duties &amp; Taxes</PARENT>
+            <TAXTYPE>GST</TAXTYPE>
+            <OPENINGBALANCE>0</OPENINGBALANCE>
+          </LEDGER>
+
+          <!-- Bank -->
+          <LEDGER NAME="HDFC Bank Current A/c">
+            <PARENT>Bank Accounts</PARENT>
+            <OPENINGBALANCE>500000</OPENINGBALANCE>
+          </LEDGER>
+
+          <!-- Cash -->
+          <LEDGER NAME="Cash">
+            <PARENT>Cash-in-Hand</PARENT>
+            <OPENINGBALANCE>25000</OPENINGBALANCE>
+          </LEDGER>
+
+          <!-- ================================================================
+               STOCK ITEMS
+               ================================================================ -->
+          <STOCKITEM NAME="Widget Alpha">
+            <BASEUNITS>Nos</BASEUNITS>
+            <CATEGORY>Electronics</CATEGORY>
+            <HSNCODE>8543</HSNCODE>
+            <TAXRATE>18</TAXRATE>
+            <GSTAPPLICABLE>Yes</GSTAPPLICABLE>
+            <STANDARDRATE>1200</STANDARDRATE>
+            <OPENINGBALANCE>100</OPENINGBALANCE>
+            <OPENINGVALUE>120000</OPENINGVALUE>
+          </STOCKITEM>
+
+          <STOCKITEM NAME="Widget Beta">
+            <BASEUNITS>Nos</BASEUNITS>
+            <CATEGORY>Electronics</CATEGORY>
+            <HSNCODE>8543</HSNCODE>
+            <TAXRATE>18</TAXRATE>
+            <GSTAPPLICABLE>Yes</GSTAPPLICABLE>
+            <STANDARDRATE>850</STANDARDRATE>
+            <OPENINGBALANCE>200</OPENINGBALANCE>
+            <OPENINGVALUE>170000</OPENINGVALUE>
+          </STOCKITEM>
+
+          <STOCKITEM NAME="Industrial Cable 1M">
+            <BASEUNITS>Nos</BASEUNITS>
+            <CATEGORY>Cables</CATEGORY>
+            <HSNCODE>8544</HSNCODE>
+            <TAXRATE>12</TAXRATE>
+            <GSTAPPLICABLE>Yes</GSTAPPLICABLE>
+            <STANDARDRATE>250</STANDARDRATE>
+            <OPENINGBALANCE>500</OPENINGBALANCE>
+            <OPENINGVALUE>125000</OPENINGVALUE>
+          </STOCKITEM>
+
+          <STOCKITEM NAME="Raw Material X">
+            <BASEUNITS>Kgs</BASEUNITS>
+            <CATEGORY>Raw Materials</CATEGORY>
+            <HSNCODE>3920</HSNCODE>
+            <TAXRATE>5</TAXRATE>
+            <GSTAPPLICABLE>Yes</GSTAPPLICABLE>
+            <STANDARDRATE>180</STANDARDRATE>
+            <OPENINGBALANCE>1000</OPENINGBALANCE>
+            <OPENINGVALUE>180000</OPENINGVALUE>
+          </STOCKITEM>
+
+          <STOCKITEM NAME="Packaging Box">
+            <BASEUNITS>Box</BASEUNITS>
+            <CATEGORY>Packaging</CATEGORY>
+            <HSNCODE>4819</HSNCODE>
+            <TAXRATE>12</TAXRATE>
+            <GSTAPPLICABLE>Yes</GSTAPPLICABLE>
+            <STANDARDRATE>45</STANDARDRATE>
+            <OPENINGBALANCE>2000</OPENINGBALANCE>
+            <OPENINGVALUE>90000</OPENINGVALUE>
+          </STOCKITEM>
+
+        </TALLYMESSAGE>
+      </REQUESTDATA>
+    </IMPORTDATA>
+  </BODY>
+</ENVELOPE>

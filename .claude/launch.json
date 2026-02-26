@@ -1,0 +1,20 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "backend",
+      "runtimeExecutable": "C:/Users/kanis/Desktop/MKCP/TALLY CLAUDE/backend/.venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"],
+      "cwd": "C:/Users/kanis/Desktop/MKCP/TALLY CLAUDE/backend",
+      "port": 8000,
+      "autoPort": false
+    },
+    {
+      "name": "frontend",
+      "runtimeExecutable": "C:/Windows/System32/cmd.exe",
+      "runtimeArgs": ["/c", "C:\\claude-servers\\frontend.bat"],
+      "port": 5173,
+      "autoPort": false
+    }
+  ]
+}
