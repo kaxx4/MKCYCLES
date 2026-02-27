@@ -1,12 +1,10 @@
-import { useState, useRef, useCallback, type DragEvent, type ChangeEvent } from "react";
+import { useState, useRef, useCallback, useEffect, type DragEvent, type ChangeEvent } from "react";
 import { Upload, FileText, AlertCircle, CheckCircle, Trash2, ChevronDown, ChevronRight } from "lucide-react";
 import { Card } from "../components";
-import { loadAndSanitizeXmlFile } from "../xml/sanitizer";
-import { parseTallyXml } from "../xml/parser";
-import { normalizeStockItem, normalizeLedger, normalizeUnit, normalizeVoucher } from "../xml/normalizer";
 import { getCached, setCached } from "../db/cache";
 import { useDataStore } from "../store/dataStore";
 import type { ParsedData, ImportWarning } from "../types/canonical";
+import type { WorkerResponse } from "../workers/xmlParser.worker";
 
 interface FileImportResult {
   fileName: string;
@@ -25,13 +23,29 @@ export function Import() {
   const [files, setFiles] = useState<File[]>([]);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [currentFileName, setCurrentFileName] = useState<string>("");
   const [importResults, setImportResults] = useState<FileImportResult[]>([]);
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+  const workerRef = useRef<Worker | null>(null);
 
   const { mergeData, clearData } = useDataStore();
+
+  // Initialize Web Worker
+  useEffect(() => {
+    // Create worker
+    workerRef.current = new Worker(
+      new URL("../workers/xmlParser.worker.ts", import.meta.url),
+      { type: "module" }
+    );
+
+    // Cleanup on unmount
+    return () => {
+      workerRef.current?.terminate();
+    };
+  }, []);
 
   // Drag & Drop handlers
   const handleDragEnter = useCallback((e: DragEvent<HTMLDivElement>) => {
@@ -87,7 +101,7 @@ export function Import() {
     setFiles((prev) => prev.filter((_, i) => i !== index));
   };
 
-  // Parse a single XML file
+  // Parse a single XML file using Web Worker
   const parseXmlFile = async (file: File): Promise<FileImportResult> => {
     const result: FileImportResult = {
       fileName: file.name,
@@ -112,102 +126,46 @@ export function Import() {
           file: file.name,
           severity: "info",
           element: "Cache",
-          message: "Loaded from cache",
+          message: "Loaded from cache (instant)",
         });
       } else {
         // Read file as ArrayBuffer
         const buffer = await file.arrayBuffer();
 
-        // Step 1: Load and sanitize
-        const sanitizedXml = loadAndSanitizeXmlFile(buffer);
-
-        // Step 2: Parse XML
-        const xmlObj = parseTallyXml(sanitizedXml);
-
-        // Step 3: Extract TALLYMESSAGE arrays
-        let tallyMessages: any[] = [];
-
-        // Check for ENVELOPE > BODY > TALLYMESSAGE structure
-        if (xmlObj.ENVELOPE?.BODY?.DATA?.TALLYMESSAGE) {
-          const tm = xmlObj.ENVELOPE.BODY.DATA.TALLYMESSAGE;
-          tallyMessages = Array.isArray(tm) ? tm : [tm];
-        } else if (xmlObj.ENVELOPE?.BODY?.TALLYMESSAGE) {
-          const tm = xmlObj.ENVELOPE.BODY.TALLYMESSAGE;
-          tallyMessages = Array.isArray(tm) ? tm : [tm];
-        } else if (xmlObj.TALLYMESSAGE) {
-          const tm = xmlObj.TALLYMESSAGE;
-          tallyMessages = Array.isArray(tm) ? tm : [tm];
-        } else if (xmlObj.ENVELOPE?.BODY) {
-          // Fallback: treat BODY as a single message
-          tallyMessages = [xmlObj.ENVELOPE.BODY];
-        }
-
-        // Step 4: Initialize ParsedData
-        parsedData = {
-          company: null,
-          ledgers: new Map(),
-          stockItems: new Map(),
-          units: new Map(),
-          vouchers: [],
-          importedAt: new Date(),
-          sourceFiles: [file.name],
-          warnings: [],
-        };
-
-        // Step 5: Process each TALLYMESSAGE
-        for (const msg of tallyMessages) {
-          // Extract company info
-          if (msg.COMPANY) {
-            const companies = Array.isArray(msg.COMPANY) ? msg.COMPANY : [msg.COMPANY];
-            for (const companyRaw of companies) {
-              if (companyRaw.NAME) {
-                parsedData.company = {
-                  name: companyRaw.NAME,
-                  gstin: companyRaw.GSTIN || companyRaw.COMPANYGSTREGISTRATIONNO,
-                  stateName: companyRaw.STATENAME,
-                  financialYearBegins: companyRaw.COMPANYFISCALYEARSTARTMONTH,
-                };
-                break;
-              }
-            }
+        // Parse using Web Worker (non-blocking)
+        console.log(`[Import] Sending ${file.name} to worker...`);
+        parsedData = await new Promise<ParsedData>((resolve, reject) => {
+          if (!workerRef.current) {
+            console.error("[Import] Worker not initialized!");
+            reject(new Error("Worker not initialized"));
+            return;
           }
 
-          // Extract units (must be parsed first for stock items)
-          const unitsList = msg['UNIT.LIST'] || [];
-          for (const unitRaw of unitsList) {
-            const unit = normalizeUnit(unitRaw);
-            if (unit) {
-              parsedData.units.set(unit.symbol, unit);
-            }
-          }
+          const handleMessage = (e: MessageEvent<WorkerResponse>) => {
+            console.log(`[Import] Received message from worker:`, e.data);
+            if (e.data.fileName !== file.name) return; // Ignore other files
 
-          // Extract ledgers
-          const ledgersList = msg['LEDGER.LIST'] || [];
-          for (const ledgerRaw of ledgersList) {
-            const ledger = normalizeLedger(ledgerRaw);
-            if (ledger) {
-              parsedData.ledgers.set(ledger.nameNormalized, ledger);
-            }
-          }
+            workerRef.current?.removeEventListener("message", handleMessage);
 
-          // Extract stock items
-          const stockItemsList = msg['STOCKITEM.LIST'] || [];
-          for (const itemRaw of stockItemsList) {
-            const item = normalizeStockItem(itemRaw, parsedData.units);
-            if (item) {
-              parsedData.stockItems.set(item.nameNormalized, item);
+            if (e.data.type === "success" && e.data.data) {
+              console.log(`[Import] Success! Got data for ${file.name}`);
+              resolve(e.data.data);
+            } else {
+              console.error(`[Import] Error from worker:`, e.data.error);
+              reject(new Error(e.data.error || "Unknown worker error"));
             }
-          }
+          };
 
-          // Extract vouchers
-          const vouchersList = msg['VOUCHER.LIST'] || [];
-          for (const voucherRaw of vouchersList) {
-            const voucher = normalizeVoucher(voucherRaw);
-            if (voucher) {
-              parsedData.vouchers.push(voucher);
-            }
-          }
-        }
+          workerRef.current.addEventListener("message", handleMessage);
+
+          // Send to worker
+          workerRef.current.postMessage({
+            type: "parse",
+            fileData: buffer,
+            fileName: file.name,
+          });
+          console.log(`[Import] Message sent to worker for ${file.name}`);
+        });
 
         // Cache the result
         await setCached(file.name, file.lastModified, parsedData);
@@ -251,20 +209,32 @@ export function Import() {
 
     setLoading(true);
     setProgress(0);
+    setCurrentFileName("");
     setImportResults([]);
 
     const results: FileImportResult[] = [];
 
+    // Process files sequentially to avoid overwhelming the browser
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       if (!file) continue;
-      setProgress(((i + 1) / files.length) * 100);
+
+      // Update progress and current file
+      setCurrentFileName(file.name);
+      setProgress(((i) / files.length) * 100);
+
+      // Small delay to let UI update
+      await new Promise(resolve => setTimeout(resolve, 10));
 
       const result = await parseXmlFile(file);
       results.push(result);
+
+      // Update results incrementally so user sees progress
+      setImportResults([...results]);
     }
 
-    setImportResults(results);
+    setProgress(100);
+    setCurrentFileName("");
     setLoading(false);
     setFiles([]);
   };
@@ -419,9 +389,16 @@ export function Import() {
                     style={{ width: `${progress}%` }}
                   />
                 </div>
-                <p className="text-sm text-gray-600 text-center mt-2">
-                  {Math.round(progress)}% complete
-                </p>
+                <div className="mt-2 space-y-1">
+                  <p className="text-sm text-gray-600 text-center">
+                    {Math.round(progress)}% complete
+                  </p>
+                  {currentFileName && (
+                    <p className="text-xs text-blue-600 text-center font-medium">
+                      Processing: {currentFileName}
+                    </p>
+                  )}
+                </div>
               </div>
             )}
           </div>
