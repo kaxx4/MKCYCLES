@@ -1,10 +1,67 @@
 import { useState, useRef, useCallback, useEffect, type DragEvent, type ChangeEvent } from "react";
-import { Upload, FileText, AlertCircle, CheckCircle, Trash2, ChevronDown, ChevronRight } from "lucide-react";
+import { Upload, FileText, AlertCircle, CheckCircle, Trash2, ChevronDown, ChevronRight, FolderOpen } from "lucide-react";
 import { Card } from "../components";
 import { getCached, setCached } from "../db/cache";
 import { useDataStore } from "../store/dataStore";
 import type { ParsedData, ImportWarning } from "../types/canonical";
 import type { WorkerResponse } from "../workers/xmlParser.worker";
+
+// IndexedDB helper for storing directory handle
+const DB_NAME = 'tally-inbox-db';
+const STORE_NAME = 'directory-handles';
+const HANDLE_KEY = 'inbox-directory';
+
+async function openHandleDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, 1);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME);
+      }
+    };
+  });
+}
+
+async function saveDirectoryHandle(handle: FileSystemDirectoryHandle): Promise<void> {
+  const db = await openHandleDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(STORE_NAME, 'readwrite');
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.put(handle, HANDLE_KEY);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve();
+  });
+}
+
+async function getDirectoryHandle(): Promise<FileSystemDirectoryHandle | null> {
+  try {
+    const db = await openHandleDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_NAME, 'readonly');
+      const store = transaction.objectStore(STORE_NAME);
+      const request = store.get(HANDLE_KEY);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve(request.result || null);
+    });
+  } catch (error) {
+    console.error('[getDirectoryHandle] Error:', error);
+    return null;
+  }
+}
+
+async function clearDirectoryHandle(): Promise<void> {
+  const db = await openHandleDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(STORE_NAME, 'readwrite');
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.delete(HANDLE_KEY);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve();
+  });
+}
 
 interface FileImportResult {
   fileName: string;
@@ -26,6 +83,7 @@ export function Import() {
   const [currentFileName, setCurrentFileName] = useState<string>("");
   const [importResults, setImportResults] = useState<FileImportResult[]>([]);
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
+  const [inboxDirectory, setInboxDirectory] = useState<string>("");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -46,6 +104,100 @@ export function Import() {
       workerRef.current?.terminate();
     };
   }, []);
+
+  // Auto-load XML files on startup from saved directory handle
+  useEffect(() => {
+    const autoLoadFiles = async () => {
+      try {
+        // Check if we have a saved directory handle
+        const savedHandle = await getDirectoryHandle();
+        if (!savedHandle) {
+          console.log('[Auto-load] No saved directory found. Skipping auto-load.');
+          return;
+        }
+
+        // Request permission to read the directory
+        // @ts-ignore - TypeScript doesn't recognize queryPermission yet
+        const permission = await savedHandle.queryPermission({ mode: 'read' });
+        if (permission !== 'granted') {
+          // @ts-ignore - TypeScript doesn't recognize requestPermission yet
+          const newPermission = await savedHandle.requestPermission({ mode: 'read' });
+          if (newPermission !== 'granted') {
+            console.log('[Auto-load] Permission denied for saved directory.');
+            return;
+          }
+        }
+
+        console.log('[Auto-load] Found saved directory. Loading XML files...');
+        setInboxDirectory(savedHandle.name);
+
+        const xmlFiles: File[] = [];
+
+        // Read all XML files from the directory
+        // @ts-ignore - TypeScript doesn't recognize FileSystemDirectoryHandle.values() yet
+        for await (const entry of savedHandle.values()) {
+          if (entry.kind === 'file' && entry.name.toLowerCase().endsWith('.xml')) {
+            const fileHandle = entry as FileSystemFileHandle;
+            const file = await fileHandle.getFile();
+            xmlFiles.push(file);
+          }
+        }
+
+        if (xmlFiles.length > 0) {
+          console.log(`[Auto-load] Found ${xmlFiles.length} XML files. Auto-importing...`);
+          setFiles(xmlFiles);
+
+          // Auto-import after a short delay to ensure UI is ready
+          setTimeout(() => {
+            handleAutoImport(xmlFiles);
+          }, 500);
+        } else {
+          console.log('[Auto-load] No XML files found in saved directory.');
+        }
+      } catch (error) {
+        console.error('[Auto-load] Failed to auto-load files:', error);
+        // Silently fail - user can manually import if needed
+      }
+    };
+
+    autoLoadFiles();
+  }, []); // Run once on mount
+
+  // Auto-import handler (similar to handleImport but for auto-load)
+  const handleAutoImport = async (filesToImport: File[]) => {
+    if (filesToImport.length === 0) return;
+
+    setLoading(true);
+    setProgress(0);
+    setCurrentFileName("");
+    setImportResults([]);
+
+    const results: FileImportResult[] = [];
+
+    // Process files sequentially to avoid overwhelming the browser
+    for (let i = 0; i < filesToImport.length; i++) {
+      const file = filesToImport[i];
+      if (!file) continue;
+
+      // Update progress and current file
+      setCurrentFileName(file.name);
+      setProgress(((i) / filesToImport.length) * 100);
+
+      // Small delay to let UI update
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const result = await parseXmlFile(file);
+      results.push(result);
+
+      // Update results incrementally so user sees progress
+      setImportResults([...results]);
+    }
+
+    setProgress(100);
+    setCurrentFileName("");
+    setLoading(false);
+    setFiles([]);
+  };
 
   // Drag & Drop handlers
   const handleDragEnter = useCallback((e: DragEvent<HTMLDivElement>) => {
@@ -248,6 +400,64 @@ export function Import() {
     }
   };
 
+  // Set inbox directory for auto-load
+  const handleSetInboxDirectory = async () => {
+    try {
+      // Check if File System Access API is supported
+      if (!('showDirectoryPicker' in window)) {
+        alert('Your browser does not support the File System Access API. Please use Chrome, Edge, or another Chromium-based browser.');
+        return;
+      }
+
+      // @ts-ignore - showDirectoryPicker is not in all TypeScript versions
+      const dirHandle = await window.showDirectoryPicker({
+        mode: 'read',
+        startIn: 'documents',
+      });
+
+      // Save the directory handle
+      await saveDirectoryHandle(dirHandle);
+      setInboxDirectory(dirHandle.name);
+
+      alert(`Inbox directory set to: ${dirHandle.name}\n\nXML files from this directory will be auto-loaded on app startup.`);
+
+      // Optionally, load files immediately
+      const xmlFiles: File[] = [];
+      // @ts-ignore - TypeScript doesn't recognize values() yet
+      for await (const entry of dirHandle.values()) {
+        if (entry.kind === 'file' && entry.name.toLowerCase().endsWith('.xml')) {
+          const fileHandle = entry as FileSystemFileHandle;
+          const file = await fileHandle.getFile();
+          xmlFiles.push(file);
+        }
+      }
+
+      if (xmlFiles.length > 0) {
+        const shouldImport = window.confirm(`Found ${xmlFiles.length} XML file(s). Import now?`);
+        if (shouldImport) {
+          setFiles(xmlFiles);
+          setTimeout(() => handleImport(), 100);
+        }
+      }
+    } catch (error) {
+      if ((error as Error).name === 'AbortError') {
+        console.log('[Set Inbox] User cancelled directory picker');
+      } else {
+        console.error('[Set Inbox] Error:', error);
+        alert('Failed to set inbox directory. Please try again.');
+      }
+    }
+  };
+
+  // Clear inbox directory
+  const handleClearInboxDirectory = async () => {
+    if (window.confirm('Clear saved inbox directory? You will need to set it again for auto-load.')) {
+      await clearDirectoryHandle();
+      setInboxDirectory('');
+      alert('Inbox directory cleared.');
+    }
+  };
+
   // Toggle expanded row
   const toggleRow = (index: number) => {
     setExpandedRows((prev) => {
@@ -265,13 +475,35 @@ export function Import() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold text-gray-900">Import XML Data</h1>
-        <button
-          onClick={handleClearData}
-          className="flex items-center gap-2 px-4 py-2 text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors"
-        >
-          <Trash2 size={18} />
-          Clear All Data
-        </button>
+        <div className="flex items-center gap-3">
+          {inboxDirectory && (
+            <div className="flex items-center gap-2 px-3 py-2 bg-green-50 text-green-700 rounded-lg text-sm">
+              <FolderOpen size={16} />
+              <span className="font-medium">{inboxDirectory}</span>
+              <button
+                onClick={handleClearInboxDirectory}
+                className="ml-1 text-green-600 hover:text-green-800"
+                title="Clear inbox directory"
+              >
+                ×
+              </button>
+            </div>
+          )}
+          <button
+            onClick={handleSetInboxDirectory}
+            className="flex items-center gap-2 px-4 py-2 text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors"
+          >
+            <FolderOpen size={18} />
+            Set Inbox Folder
+          </button>
+          <button
+            onClick={handleClearData}
+            className="flex items-center gap-2 px-4 py-2 text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors"
+          >
+            <Trash2 size={18} />
+            Clear All Data
+          </button>
+        </div>
       </div>
 
       <Card>
@@ -532,15 +764,20 @@ export function Import() {
       <Card title="Import Instructions">
         <div className="prose prose-sm max-w-none text-gray-700">
           <p className="mb-4">
-            This page allows you to import Tally ERP XML data into the application. You can import data in three ways:
+            This page allows you to import Tally ERP XML data into the application. You can import data in multiple ways:
           </p>
           <ul className="list-disc list-inside space-y-2 mb-4">
+            <li><strong>Auto-Load (Recommended):</strong> Click "Set Inbox Folder" to choose a directory. XML files from this folder will be automatically loaded on every app startup.</li>
             <li><strong>Drag & Drop:</strong> Drag XML files directly onto the drop zone</li>
             <li><strong>File Picker:</strong> Click "Select Files" to choose individual XML files</li>
             <li><strong>Folder Picker:</strong> Click "Select Folder" to import all XML files from a directory</li>
           </ul>
           <p className="mb-4">
             <strong>Supported data types:</strong> Stock Items, Ledgers, Units, and Vouchers (Sales, Purchase, etc.)
+          </p>
+          <p className="text-blue-700 mb-4">
+            <strong>Auto-Load Feature:</strong> Once you set an inbox folder (e.g., <code>C:\Users\kanis\Desktop\MKCP\TALLY CLAUDE\backend\data\tally_inbox</code>),
+            the app will automatically import all XML files from that folder every time you open the app. The browser will remember your choice.
           </p>
           <p className="text-amber-700 mb-4">
             <strong>Note:</strong> Files are automatically cached for faster subsequent imports. The cache expires after 24 hours.

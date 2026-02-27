@@ -19,10 +19,14 @@ from typing import Tuple
 
 from loguru import logger
 
+# Large file threshold for chunk-based sanitization (100 MB)
+SANITIZE_CHUNK_THRESHOLD = 100 * 1024 * 1024
+
 # Valid XML 1.0 character ranges (per XML spec §2.2)
 # Allowed: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+# Also include \uFEFF (BOM character) which can slip through encoding detection
 _INVALID_XML_CHAR_RE = re.compile(
-    r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]"
+    r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\uFEFF]"
 )
 
 # Invalid XML character number references (e.g. &#12; or &#x0B;)
@@ -54,7 +58,11 @@ def _fix_encoding(raw: bytes) -> Tuple[bytes, str]:
             # Strip UTF-8 BOM if present
             if fixed.startswith(b"\xef\xbb\xbf"):
                 fixed = fixed[3:]
-            return fixed, "utf-16-le"
+            # Also strip Unicode BOM from the text if it slipped through
+            text = fixed.decode("utf-8", errors="replace")
+            if text.startswith("\ufeff"):
+                text = text[1:]
+            return text.encode("utf-8"), "utf-16-le"
         except (UnicodeDecodeError, LookupError):
             pass
     elif raw.startswith(b"\xfe\xff"):
@@ -64,7 +72,11 @@ def _fix_encoding(raw: bytes) -> Tuple[bytes, str]:
             fixed = text.encode("utf-8")
             if fixed.startswith(b"\xef\xbb\xbf"):
                 fixed = fixed[3:]
-            return fixed, "utf-16-be"
+            # Also strip Unicode BOM from the text if it slipped through
+            text = fixed.decode("utf-8", errors="replace")
+            if text.startswith("\ufeff"):
+                text = text[1:]
+            return text.encode("utf-8"), "utf-16-be"
         except (UnicodeDecodeError, LookupError):
             pass
 
@@ -181,6 +193,62 @@ def _fix_xml_declaration(raw_bytes: bytes) -> bytes:
     return _XML_DECL_RE.sub(replace_decl, raw_bytes, count=1)
 
 
+def _sanitize_large(raw: bytes, source_path: str) -> Tuple[bytes, list[str]]:
+    """
+    Memory-efficient sanitisation for large UTF-16 files.
+    Decodes and sanitizes in a single pass to avoid double-buffering.
+
+    Parameters
+    ----------
+    raw:         Raw bytes from the file (may be >100MB).
+    source_path: File path for logging.
+
+    Returns
+    -------
+    (clean_bytes, warnings)
+    """
+    warnings: list[str] = []
+
+    # Detect encoding
+    if raw.startswith(b'\xff\xfe'):
+        encoding = 'utf-16-le'
+        raw = raw[2:]  # strip BOM
+    elif raw.startswith(b'\xfe\xff'):
+        encoding = 'utf-16-be'
+        raw = raw[2:]
+    else:
+        encoding = 'utf-8'
+        # Strip UTF-8 BOM if present
+        if raw.startswith(b'\xef\xbb\xbf'):
+            raw = raw[3:]
+
+    warnings.append(f"Large file mode: Re-encoded from {encoding} to UTF-8")
+    logger.info(f"{source_path}: Large file mode ({len(raw):,} bytes), encoding={encoding}")
+
+    # Decode in one pass
+    text = raw.decode(encoding, errors='replace')
+
+    # Strip BOM char if it slipped through
+    if text.startswith('\ufeff'):
+        text = text[1:]
+
+    # Apply regex substitutions (these operate on the string in-place)
+    text, ref_w = _strip_invalid_char_refs(text)
+    warnings.extend(ref_w)
+    if ref_w:
+        logger.warning(f"{source_path}: {ref_w[0]}")
+
+    text, char_w = _strip_invalid_chars(text)
+    warnings.extend(char_w)
+    if char_w:
+        logger.warning(f"{source_path}: {char_w[0]}")
+
+    clean_bytes = text.encode('utf-8')
+    clean_bytes = _fix_xml_declaration(clean_bytes)
+
+    return clean_bytes, warnings
+
+
 def sanitize_xml(
     raw: bytes,
     *,
@@ -191,10 +259,11 @@ def sanitize_xml(
     Full sanitisation pipeline.
 
     1. Save raw backup copy.
-    2. Decode to UTF-8 (auto-detect encoding).
-    3. Strip invalid XML characters.
-    4. Fix XML declaration.
-    5. Return clean UTF-8 bytes + warnings list.
+    2. Decode to UTF-8 (auto-detect encoding), strip BOM.
+    3. Strip invalid character references (&#N;).
+    4. Strip raw invalid control chars (including \uFEFF BOM).
+    5. Fix XML declaration.
+    6. Return clean UTF-8 bytes + warnings list.
 
     Parameters
     ----------
@@ -221,28 +290,34 @@ def sanitize_xml(
         except OSError as e:
             warnings.append(f"Could not write raw backup: {e}")
 
-    # --- 2. Encoding fix ---
-    utf8_bytes, detected_enc = _fix_encoding(raw)
-    if detected_enc != "utf-8":
-        warnings.append(f"Re-encoded from {detected_enc} to UTF-8")
-        logger.info(f"{source_path}: Re-encoded from {detected_enc}")
+    # --- 2. Choose sanitization path based on file size ---
+    if len(raw) > SANITIZE_CHUNK_THRESHOLD:
+        clean_bytes, enc_warnings = _sanitize_large(raw, source_path)
+        warnings.extend(enc_warnings)
+    else:
+        # --- 2a. Decode to UTF-8, strip BOM ---
+        utf8_bytes, detected_enc = _fix_encoding(raw)
+        if detected_enc != "utf-8":
+            warnings.append(f"Re-encoded from {detected_enc} to UTF-8")
+            logger.info(f"{source_path}: Re-encoded from {detected_enc}")
 
-    # --- 3. Fix XML declaration ---
-    utf8_bytes = _fix_xml_declaration(utf8_bytes)
+        # --- 3. Decode to str for char-level cleaning ---
+        text = utf8_bytes.decode("utf-8", errors="replace")
 
-    # --- 4. Strip invalid char refs & control chars ---
-    text = utf8_bytes.decode("utf-8", errors="replace")
-    text, ref_warnings = _strip_invalid_char_refs(text)
-    warnings.extend(ref_warnings)
-    
-    if ref_warnings:
-        logger.warning(f"{source_path}: {ref_warnings[0]}")
-    
-    text, char_warnings = _strip_invalid_chars(text)
-    warnings.extend(char_warnings)
+        # --- 4. Strip invalid &#N; character references ---
+        text, ref_warnings = _strip_invalid_char_refs(text)
+        warnings.extend(ref_warnings)
+        if ref_warnings:
+            logger.warning(f"{source_path}: {ref_warnings[0]}")
 
-    if char_warnings:
-        logger.warning(f"{source_path}: {char_warnings[0]}")
+        # --- 5. Strip raw invalid control chars (includes \uFEFF BOM if any) ---
+        text, char_warnings = _strip_invalid_chars(text)
+        warnings.extend(char_warnings)
+        if char_warnings:
+            logger.warning(f"{source_path}: {char_warnings[0]}")
 
-    clean_bytes = text.encode("utf-8")
+        # --- 6. Re-encode, fix XML declaration ---
+        clean_bytes = text.encode("utf-8")
+        clean_bytes = _fix_xml_declaration(clean_bytes)
+
     return clean_bytes, warnings

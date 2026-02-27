@@ -26,6 +26,7 @@ Canonical Tally XML structure assumed:
 
 from __future__ import annotations
 
+import io
 import re
 from datetime import date, datetime
 from typing import Any, Optional
@@ -495,52 +496,8 @@ def _parse_ledger_entries(voucher_el: ET.Element) -> list[dict[str, Any]]:
 # ── Top-level XML parse ───────────────────────────────────────────────────────
 
 
-def parse_xml_file(
-    clean_bytes: bytes,
-) -> dict[str, Any]:
-    """
-    Parse sanitised XML bytes and return a dict:
-    {
-      "company": {...} | None,
-      "ledgers": [...],
-      "units": [...],
-      "stock_items": [...],
-      "vouchers": [...],
-      "file_type": "master" | "transaction" | "mixed",
-    }
-    """
-    try:
-        root = ET.fromstring(clean_bytes)
-    except ET.ParseError as e:
-        raise ValueError(f"XML parse error: {e}") from e
-
-    result: dict[str, Any] = {
-        "company": None,
-        "ledgers": [],
-        "units": [],
-        "stock_items": [],
-        "vouchers": [],
-        "file_type": "unknown",
-    }
-
-    # Extract company name from header SVCURRENTCOMPANY (fallback when no <COMPANY> element)
-    svc_company_name: str | None = None
-    svc_gstin: str | None = None
-    for el in root.findall(".//SVCURRENTCOMPANY"):
-        if el.text and el.text.strip():
-            svc_company_name = el.text.strip()
-            break
-    for el in root.findall(".//CMPGSTIN"):
-        if el.text and el.text.strip():
-            svc_gstin = el.text.strip()
-            break
-
-    # Walk all TALLYMESSAGE descendants
-    tally_msgs = root.findall(".//TALLYMESSAGE")
-    if not tally_msgs:
-        # Some exports omit TALLYMESSAGE wrapper – scan direct children of BODY
-        tally_msgs = [root]
-
+def _process_tally_messages(tally_msgs, result: dict) -> None:
+    """Shared logic: extract masters and vouchers from a list of TALLYMESSAGE elements."""
     for msg in tally_msgs:
         # Company
         for el in msg.findall("COMPANY") + msg.findall(".//COMPANY"):
@@ -577,20 +534,9 @@ def parse_xml_file(
             except Exception as exc:
                 logger.warning(f"Could not parse VOUCHER: {exc}")
 
-    # If no COMPANY element found but header has company name, synthesise one
-    if result["company"] is None and svc_company_name:
-        result["company"] = {
-            "name": svc_company_name,
-            "gstin": svc_gstin,
-            "address": None,
-            "state": None,
-            "pincode": None,
-            "email": None,
-            "phone": None,
-        }
-        logger.info(f"Company synthesised from SVCURRENTCOMPANY: {svc_company_name}")
 
-    # Determine file type
+def _set_file_type(result: dict) -> None:
+    """Determine file type based on what data is present."""
     has_masters = bool(
         result["ledgers"] or result["units"] or result["stock_items"] or result["company"]
     )
@@ -602,4 +548,127 @@ def parse_xml_file(
     elif has_txns:
         result["file_type"] = "transaction"
 
+
+def _parse_xml_dom(clean_bytes: bytes, result: dict) -> dict:
+    """Original DOM parse for small files."""
+    try:
+        root = ET.fromstring(clean_bytes)
+    except ET.ParseError as e:
+        raise ValueError(f"XML parse error: {e}") from e
+
+    # Extract SVCURRENTCOMPANY
+    svc_company_name = None
+    svc_gstin = None
+    for el in root.findall(".//SVCURRENTCOMPANY"):
+        if el.text and el.text.strip():
+            svc_company_name = el.text.strip()
+            break
+    for el in root.findall(".//CMPGSTIN"):
+        if el.text and el.text.strip():
+            svc_gstin = el.text.strip()
+            break
+
+    tally_msgs = root.findall(".//TALLYMESSAGE")
+    if not tally_msgs:
+        tally_msgs = [root]
+
+    _process_tally_messages(tally_msgs, result)
+
+    if result["company"] is None and svc_company_name:
+        result["company"] = {
+            "name": svc_company_name, "gstin": svc_gstin,
+            "address": None, "state": None, "pincode": None,
+            "email": None, "phone": None,
+        }
+
+    _set_file_type(result)
     return result
+
+
+def _parse_xml_streaming(clean_bytes: bytes, result: dict) -> dict:
+    """
+    Memory-efficient streaming parse using iterparse.
+    Processes one TALLYMESSAGE at a time, clearing elements from memory.
+    """
+    logger.info(f"Using streaming parse for large file ({len(clean_bytes):,} bytes)")
+
+    svc_company_name = None
+    svc_gstin = None
+
+    stream = io.BytesIO(clean_bytes)
+    context = ET.iterparse(stream, events=("start", "end"))
+
+    current_msg = None
+    depth = 0
+
+    for event, elem in context:
+        if event == "start":
+            if elem.tag == "SVCURRENTCOMPANY" and svc_company_name is None:
+                pass  # will get text on "end"
+            if elem.tag == "TALLYMESSAGE":
+                current_msg = elem
+                depth = 0
+            elif current_msg is not None:
+                depth += 1
+
+        elif event == "end":
+            if elem.tag == "SVCURRENTCOMPANY" and svc_company_name is None:
+                if elem.text and elem.text.strip():
+                    svc_company_name = elem.text.strip()
+            elif elem.tag == "CMPGSTIN" and svc_gstin is None:
+                if elem.text and elem.text.strip():
+                    svc_gstin = elem.text.strip()
+
+            if elem.tag == "TALLYMESSAGE" and current_msg is not None:
+                # Process this message
+                _process_tally_messages([current_msg], result)
+                # Free memory
+                current_msg.clear()
+                current_msg = None
+                depth = 0
+                # Also clear the element from the parse tree
+                elem.clear()
+
+    if result["company"] is None and svc_company_name:
+        result["company"] = {
+            "name": svc_company_name, "gstin": svc_gstin,
+            "address": None, "state": None, "pincode": None,
+            "email": None, "phone": None,
+        }
+
+    _set_file_type(result)
+    return result
+
+
+def parse_xml_file(
+    clean_bytes: bytes,
+) -> dict[str, Any]:
+    """
+    Parse sanitised XML bytes. For large files (>50 MB), uses iterparse
+    to avoid loading the entire DOM into RAM.
+
+    Returns a dict:
+    {
+      "company": {...} | None,
+      "ledgers": [...],
+      "units": [...],
+      "stock_items": [...],
+      "vouchers": [...],
+      "file_type": "master" | "transaction" | "mixed",
+    }
+    """
+    result: dict[str, Any] = {
+        "company": None,
+        "ledgers": [],
+        "units": [],
+        "stock_items": [],
+        "vouchers": [],
+        "file_type": "unknown",
+    }
+
+    SIZE_THRESHOLD = 50 * 1024 * 1024  # 50 MB
+
+    if len(clean_bytes) > SIZE_THRESHOLD:
+        return _parse_xml_streaming(clean_bytes, result)
+    else:
+        return _parse_xml_dom(clean_bytes, result)

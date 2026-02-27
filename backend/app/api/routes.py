@@ -92,6 +92,12 @@ def health(session: Session = Depends(get_session)):
 # ── Import ────────────────────────────────────────────────────────────────────
 
 
+async def _stream_to_file(upload_file: UploadFile, dest_file) -> None:
+    """Stream uploaded file to disk in 1MB chunks to avoid loading entire file in RAM."""
+    while chunk := await upload_file.read(1024 * 1024):  # 1 MB chunks
+        dest_file.write(chunk)
+
+
 @router.post("/import", response_model=ImportResponse)
 async def manual_import(
     file: Optional[UploadFile] = File(default=None),
@@ -103,13 +109,12 @@ async def manual_import(
     Either upload a file via multipart, or provide a server-side path.
     """
     if file is not None:
-        # Save uploaded file to a temp location then import
+        # Stream uploaded file to disk in chunks (memory-efficient for large files)
         suffix = Path(file.filename or "upload.xml").suffix
         with tempfile.NamedTemporaryFile(
             delete=False, suffix=suffix, dir=settings.TALLY_INBOX
         ) as tmp:
-            content = await file.read()
-            tmp.write(content)
+            await _stream_to_file(file, tmp)
             tmp_path = tmp.name
         log = import_file(tmp_path)
     elif path:
